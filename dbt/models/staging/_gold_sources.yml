@@ -1,0 +1,29 @@
+# dbt/models/staging/_gold_sources.yml
+#
+# Declares the Gold schema (populated by pipelines/gold/load_gold_to_postgres.py,
+# itself fed by Week 2's build_dimensions.py / build_facts.py / build_kpi.py)
+# as dbt sources. Every staging model below reads from source(), never a
+# hardcoded schema.table reference -- this is what lets dbt's lineage
+# graph (`dbt docs generate`) show the true Gold -> staging -> marts
+# dependency chain, and what makes a future schema/database rename a
+# one-line source() config change instead of a find-and-replace across
+# every model.
+
+version: 2
+
+sources:
+  - name: gold
+    schema: gold
+    tables:
+      - name: dim_academic_year
+      - name: dim_semester
+      - name: dim_calendar
+      - name: dim_college
+      - name: dim_program
+      - name: dim_student
+      - name: fact_enrollment
+      - name: fact_graduation
+      - name: fact_dropout
+      - name: fact_shifter
+      - name: fact_retention
+      - name: fact_institution_kpi

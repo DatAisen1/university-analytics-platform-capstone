@@ -1,0 +1,39 @@
+# --- Core ---
+python-dotenv==1.2.1
+pydantic==2.7.1
+pydantic-settings==2.2.1
+pyyaml==6.0.1
+
+# --- Data generation & manipulation ---
+faker==25.2.0           # used by data_generator/ -- see docs/08 for the faker/data_generator naming note
+pandas==2.2.2
+numpy==1.26.4           # used for seeded weighted sampling in data_generator/generators/
+
+# --- Validation ---
+# pandera==0.19.0     # Bronze schema validation, added Week 2 (Day 9)
+pandera==0.32.1
+
+# --- Storage / warehouse clients (Week 2-3) ---
+boto3==1.43.47          # S3/MinIO-compatible client -- see pipelines/common/storage.py
+duckdb==1.5.4            # in-pipeline transform engine + pipeline_run_log metadata store
+pyarrow==25.0.0           # Parquet read/write for Bronze/Silver/Gold
+psycopg2-binary==2.9.12   # Postgres warehouse client -- see pipelines/common/postgres.py
+
+# --- Orchestration / transformation (Week 2-3) ---
+sqlalchemy==2.0.44        # used by pipelines/gold/load_gold_to_postgres.py
+dbt-core==1.12.0
+dbt-postgres==1.11.0
+dagster==1.13.14
+dagster-webserver==1.13.14
+
+# --- ML / forecasting (Week 3, Day 20) ---
+prophet==1.1.5
+scikit-learn==1.4.2
+
+# --- Testing ---
+pytest==8.2.0
+pytest-cov==5.0.0
+moto[s3]==5.2.2   # mocks S3/MinIO for testing pipelines.common.storage.S3Storage without a live server
+
+# --- Logging ---
+python-json-logger==2.0.7

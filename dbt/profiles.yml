@@ -1,0 +1,25 @@
+# dbt/profiles.yml
+#
+# Safe to commit: every credential comes from env_var(), never a literal
+# value. dbt connects AS dbt_role specifically -- the role Day 15 scoped
+# to exactly "read gold, read/write marts" (docs/06_Data_Warehouse.md
+# Section 5). dbt should never run as pipeline_writer or admin; using its
+# own least-privilege role here is what makes that RBAC boundary actually
+# apply to dbt runs, not just to manual psql sessions.
+#
+# Usage: point dbt at this file instead of the default ~/.dbt/profiles.yml
+#   export DBT_PROFILES_DIR=dbt
+#   dbt run --project-dir dbt
+
+university_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'university_analytics') }}"
+      user: dbt_role
+      password: "{{ env_var('DBT_ROLE_PASSWORD') }}"
+      schema: marts
+      threads: 4

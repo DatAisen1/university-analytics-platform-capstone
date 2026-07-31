@@ -1,0 +1,55 @@
+# --- Environments & secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.coverage
+htmlcov/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Data & artifacts (never commit generated data) ---
+data_generator/output/*
+!data_generator/output/.gitkeep
+logs/*
+!logs/.gitkeep
+*.parquet
+*.csv
+!configs/**/*.csv
+
+# --- Warehouse artifacts (Bronze/Silver/Gold local stand-ins + metadata DB) ---
+warehouse/bronze_store/
+warehouse/silver_store/
+warehouse/gold_store/
+warehouse/meta.duckdb
+
+# --- dbt ---
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# --- Docker ---
+docker/volumes/
+
+# --- Model artifacts ---
+models/forecasting/artifacts/
+forecasting/artifacts/*.pkl
+forecasting/artifacts/*.json
+
+# --- OS / editor cruft ---
+.DS_Store
+.vscode/
+.idea/
+*.swp

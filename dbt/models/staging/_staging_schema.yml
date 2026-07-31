@@ -1,0 +1,125 @@
+# dbt/models/staging/_staging_schema.yml
+#
+# Generic dbt tests on staging models. Surrogate keys get not_null +
+# unique; natural keys get unique WHERE that's actually true of the
+# grain (dim_student's student_id is deliberately NOT unique here --
+# SCD2 means one student can have multiple rows, by design; testing
+# uniqueness on student_id would be testing the wrong thing and would
+# fail on every shifted student, which is correct behavior, not a bug).
+
+version: 2
+
+models:
+  - name: stg_dim_academic_year
+    columns:
+      - name: academic_year_key
+        tests: [not_null, unique]
+
+  - name: stg_dim_semester
+    columns:
+      - name: semester_key
+        tests: [not_null, unique]
+      - name: semester_id
+        tests: [not_null, unique]
+
+  - name: stg_dim_calendar
+    columns:
+      - name: date_key
+        tests: [not_null, unique]
+
+  - name: stg_dim_college
+    columns:
+      - name: college_key
+        tests: [not_null, unique]
+      - name: college_id
+        tests: [not_null, unique]
+
+  - name: stg_dim_program
+    columns:
+      - name: program_key
+        tests: [not_null, unique]
+      - name: program_id
+        tests: [not_null, unique]
+
+  - name: stg_dim_student
+    columns:
+      - name: student_key
+        tests: [not_null, unique]   # the surrogate key is unique per SCD2 row
+      - name: student_id
+        tests: [not_null]           # deliberately NOT unique -- SCD2 gives shifted students >1 row
+
+  - name: stg_fact_enrollment
+    columns:
+      - name: student_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_student')
+                field: student_key
+      - name: program_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_program')
+                field: program_key
+      - name: college_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_college')
+                field: college_key
+      - name: semester_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_semester')
+                field: semester_key
+      - name: enrollment_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['ENROLLED', 'GRADUATED', 'DROPPED']
+
+  - name: stg_fact_graduation
+    columns:
+      - name: student_key
+        tests: [not_null]
+      - name: program_key
+        tests: [not_null]
+
+  - name: stg_fact_dropout
+    columns:
+      - name: student_key
+        tests: [not_null]
+      - name: dropout_reason
+        tests: [not_null]
+
+  - name: stg_fact_shifter
+    columns:
+      - name: student_key
+        tests: [not_null]
+      - name: from_program_key
+        tests: [not_null]
+      - name: to_program_key
+        tests: [not_null]
+
+  - name: stg_fact_retention
+    columns:
+      - name: student_key
+        tests: [not_null]
+      - name: is_retained
+        tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+
+  - name: stg_fact_institution_kpi
+    columns:
+      - name: college_key
+        tests: [not_null]
+      - name: semester_key
+        tests: [not_null]

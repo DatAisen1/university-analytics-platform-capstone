@@ -1,0 +1,41 @@
+# dbt/dbt_project.yml
+#
+# See docs/07_Technology_Stack.md Section 4 for why dbt: version-controlled
+# SQL, built-in testing, and auto-generated documentation/lineage turn
+# "we have data quality and documentation" from a manual writing exercise
+# into a natural byproduct of doing the transformation work correctly.
+#
+# Schema note (an adaptation from the folder-per-layer plan, made explicit):
+# staging/ and marts/ are separate FOLDERS here (matching docs/03's repo
+# structure), but both materialize into the single `marts` Postgres schema
+# -- not a separate `staging` schema. Inventing a new Postgres schema for
+# staging would mean revisiting Day 15's already-tested RBAC grants
+# (dbt_role only has USAGE+SELECT on `gold` and full read/write on
+# `marts`); collapsing staging into `marts` avoids that without changing
+# the model organization dbt users actually see. Layers are distinguished
+# by name prefix (stg_ vs mart_), not by schema, and neither models
+# subfolder sets a custom +schema override, so both simply inherit the
+# profile's target schema.
+
+name: 'university_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'university_analytics'
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  university_analytics:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

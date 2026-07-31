@@ -1,0 +1,81 @@
+# data_generator/config/progression_rules.yaml
+#
+# Tunable parameters for the student progression engine (dropout,
+# graduation, stall, shifter probabilities). Kept as config, not constants
+# buried in generate_progression.py, for the same reason volumes.yaml is
+# config: these are calibration knobs, and "how sensitive is dropout to
+# risk_score" is exactly the kind of thing a reviewer should be able to
+# see and adjust without reading Python.
+
+random_seed: 43   # deliberately different from generate_students.py's seed (42) --
+                   # student generation and progression simulation are independent
+                   # random processes and shouldn't share a seed/stream.
+
+# Semester index 0 = 2021-1 ... index 7 = 2024-2 (inclusive). See
+# generate_progression.semester_index_to_label for the mapping.
+max_semester_index: 7
+
+dropout:
+  # Base per-semester dropout probability by year level -- highest in
+  # year 1 (real-world attrition is front-loaded), decaying afterward.
+  # Year levels beyond 5 (shouldn't occur given the stall cap) fall back
+  # to the highest defined key.
+  base_prob_by_year_level:
+    1: 0.06
+    2: 0.035
+    3: 0.02
+    4: 0.015
+    5: 0.015
+  # Risk multiplier interpolates linearly between these bounds as
+  # risk_score goes from 0 -> 1. A risk_score of 0 halves the base rate;
+  # a risk_score of 1 doubles it.
+  risk_multiplier_min: 0.5
+  risk_multiplier_max: 2.0
+  # Each prior stall (re-enrolled at the same year level) adds this much
+  # *relative* increase to dropout probability -- stalling is a leading
+  # indicator of eventually leaving.
+  stall_multiplier_per_stall: 0.5
+  max_probability: 0.35
+  reason_weights:
+    Financial: 0.35
+    Academic: 0.30
+    Personal: 0.20
+    "Transferred Institution": 0.10
+    Unknown: 0.05
+
+graduation:
+  # Once a student reaches nominal-duration-or-beyond, this is the
+  # probability of graduating THIS semester, ramping up for each extra
+  # semester past nominal duration (most eligible students finish within
+  # a few extra semesters rather than lingering indefinitely).
+  base_probability: 0.35
+  ramp_per_extra_semester: 0.15
+  max_probability: 0.9
+  # Higher risk_score reduces graduation probability even once eligible
+  # (struggling students are less likely to finish on reaching eligibility,
+  # not just more likely to drop out earlier).
+  risk_penalty_factor: 0.3
+
+stall:
+  base_probability: 0.08
+  risk_multiplier_min: 0.5
+  risk_multiplier_max: 2.0
+  # year_level is capped at nominal_duration_years + this many extra years,
+  # so a perpetually-stalling student doesn't accumulate an unbounded
+  # year_level -- they just stay capped (and keep accumulating stall_count,
+  # which keeps pushing dropout probability up).
+  max_year_level_cap_extra_years: 2
+
+shifter:
+  # Shifting is only modeled in years 1-2, reflecting real curriculum
+  # lock-in after that point (see docs/08_Faker_Data_Generator.md).
+  probability_year_1: 0.02
+  probability_year_2: 0.01
+  # Probability the new program is drawn from the SAME college (a lateral
+  # move within, e.g., CICT) vs. a genuinely different college.
+  same_college_weight: 0.7
+  max_shifts_per_student: 1
+
+enrollment:
+  units_enrolled_min: 15
+  units_enrolled_max: 24

@@ -1,0 +1,37 @@
+# configs/colleges.yaml
+#
+# Reference data: NEUST Sumacab Campus colleges.
+# This is the single source of truth for which colleges exist. Nothing in
+# pipeline code should ever hardcode a college name or ID — if a college is
+# renamed, merged, or added, this file changes and nothing else does.
+#
+# college_id: short stable code, used as the natural key everywhere downstream
+#             (Bronze/Silver/Gold, dashboard filters). Never reuse a retired
+#             college_id for a different college later — that would corrupt
+#             historical joins.
+
+version: 1
+colleges:
+  - college_id: COA
+    college_name: "College of Architecture"
+
+  - college_id: COED
+    college_name: "College of Education"
+
+  - college_id: COE
+    college_name: "College of Engineering"
+
+  - college_id: COC
+    college_name: "College of Criminology"
+
+  - college_id: CICT
+    college_name: "College of Information and Communications Technology"
+
+  - college_id: CMBT
+    college_name: "College of Management and Business Technology"
+
+  - college_id: CPADM
+    college_name: "College of Public Administration and Disaster Management"
+
+  - college_id: IPE
+    college_name: "Institute of Physical Education"

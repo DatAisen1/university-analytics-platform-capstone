@@ -1,0 +1,23 @@
+# data_generator/config/admissions_rules.yaml
+#
+# Calibration for the DERIVED applicants/accepted admissions funnel
+# (P0 #15). These numbers are intentionally NOT used to independently
+# sample applicant/accepted counts -- they're used to work BACKWARD from
+# the already-generated, real freshman-enrollment counts in
+# student_master.csv, guaranteeing applicants >= accepted >= enrolled by
+# construction for every (cohort, college, program) group, every time.
+# Sampling applicants/accepted independently would recreate exactly the
+# "each dataset generated independently" antipattern P0 #10/#14 already
+# fixed for enrollment/graduation/dropout/shifter.
+
+random_seed: 45  # independent of generate_students (42) and generate_progression (43)
+
+# Fraction of ACCEPTED applicants who actually enroll (yield). Sampled
+# per (cohort, college, program) group within this range.
+yield_rate_min: 0.55
+yield_rate_max: 0.85
+
+# Fraction of APPLICANTS who are accepted. Sampled per (cohort, college,
+# program) group within this range.
+acceptance_rate_min: 0.55
+acceptance_rate_max: 0.85

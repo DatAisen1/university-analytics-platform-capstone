@@ -1,0 +1,135 @@
+# data_generator/config/volumes.yaml
+#
+# Controls cohort sizes and the distributions used to generate the student
+# master population. Kept as config (not hardcoded in generate_students.py)
+# for the same reason configs/colleges.yaml is config: these are calibration
+# knobs someone should be able to tune (e.g., to model a growing or shrinking
+# institution) without touching generator code.
+
+random_seed: 42
+
+# Number of new (entering) students per academic-year cohort. Slight growth
+# year-over-year to give the enrollment trend something realistic to show
+# in Gold/dashboards, rather than a flat, suspiciously-uniform series.
+cohort_sizes:
+  2021: 1800
+  2022: 1900
+  2023: 2000
+  2024: 2100
+
+# Share of each cohort assigned to each college. Must sum to 1.0 and every
+# key must exist in configs/colleges.yaml (cross-validated at load time).
+# Weighted to roughly reflect realistic relative college size at a regional
+# state university: larger ICT/Business/Education enrollment, smaller
+# Architecture/PE.
+college_weights:
+  COA: 0.05
+  COED: 0.20
+  COE: 0.10
+  COC: 0.08
+  CICT: 0.20
+  CMBT: 0.25
+  CPADM: 0.07
+  IPE: 0.05
+
+# Share of each COLLEGE's entering cohort assigned to each of its own
+# programs. Each college's weights must sum to 1.0, and the set of
+# program_ids under each college must exactly match configs/programs.yaml
+# (cross-validated at load time -- see validate_program_weights_match_
+# reference). This replaces a previous uniform-random program pick within
+# a college, which produced an unrealistic near-even split across e.g.
+# CICT's 4 programs (~25% each) -- real programs are never equally
+# popular.
+program_weights:
+  COA:
+    COA-BSARCH: 0.55
+    COA-CERT-DRAFT: 0.20
+    COA-CERT-CADD: 0.15
+    COA-CERT-BUT: 0.10
+  COED:
+    COED-BEED: 0.16
+    COED-BSED-ENG: 0.12
+    COED-BSED-MATH: 0.09
+    COED-BSED-FIL: 0.08
+    COED-BSED-SCI: 0.08
+    COED-BECED: 0.08
+    COED-BSED-SS: 0.07
+    COED-BPE: 0.07
+    COED-BTLED-HE: 0.06
+    COED-BSIE-IA: 0.05
+    COED-BSED-PHYS: 0.04
+    COED-BSNED: 0.04
+    COED-CERT-PTE: 0.03
+    COED-PBD-ALS: 0.03
+  COE:
+    COE-BSCE: 0.40
+    COE-BSEE: 0.35
+    COE-BSME: 0.25
+  COC:
+    COC-BSCRIM: 1.00
+  CICT:
+    CICT-BSIT-WEB: 0.30
+    CICT-BSIT-NET: 0.25
+    CICT-BSIT-DB: 0.25
+    CICT-BSDS: 0.20
+  CMBT:
+    CMBT-BSBA-FM: 0.18
+    CMBT-BSBA-HRM: 0.16
+    CMBT-BSBA-MM: 0.15
+    CMBT-BSENTREP: 0.12
+    CMBT-BSHM: 0.12
+    CMBT-BSBA-ECON: 0.10
+    CMBT-BSBA-BPO: 0.09
+    CMBT-BSTM: 0.08
+  CPADM:
+    CPADM-BPA: 0.65
+    CPADM-BPA-DRM: 0.35
+  IPE:
+    IPE-CERT-PE: 1.00
+
+admission_type_weights:
+  Freshman: 0.85
+  Transferee: 0.15
+
+gender_weights:
+  Male: 0.48
+  Female: 0.52
+
+# Weighted toward Nueva Ecija (NEUST Sumacab's home province), reflecting
+# realistic commuter-driven enrollment clustering, with a long tail of
+# nearby/other provinces.
+home_province_weights:
+  "Nueva Ecija": 0.55
+  "Aurora": 0.08
+  "Nueva Vizcaya": 0.06
+  "Bulacan": 0.06
+  "Pampanga": 0.05
+  "Tarlac": 0.05
+  "Quezon": 0.04
+  "Isabela": 0.04
+  "Bataan": 0.03
+  "Other": 0.04
+
+# Age-at-entry offset from the nominal age of 18, weighted to decay quickly
+# (most students enter at the "expected" age; a shrinking minority enter
+# older). Keys are years added to 18; values are relative weights.
+age_offset_weights:
+  0: 0.55
+  1: 0.20
+  2: 0.10
+  3: 0.06
+  4: 0.04
+  5: 0.03
+  6: 0.01
+  7: 0.01
+
+# Beta distribution parameters for the latent per-student risk score in
+# [0, 1]. alpha < beta skews the distribution toward low risk: most students
+# are unremarkable, a meaningful minority carry elevated dropout/stall
+# propensity. This score is NEVER written to student_master.csv -- a real
+# registrar export has no such column. It lives only in
+# output/_internal/student_latent_profiles.csv for the Day 5 progression
+# engine to consume.
+risk_profile:
+  beta_alpha: 2.0
+  beta_beta: 5.0

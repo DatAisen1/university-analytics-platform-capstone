@@ -1,0 +1,216 @@
+# configs/programs.yaml
+#
+# Reference data: NEUST Sumacab Campus programs, one entry per program,
+# each pointing at its owning college via college_id (must exist in
+# configs/colleges.yaml — enforced by pipelines/common/config.py).
+#
+# nominal_duration_years drives graduation-eligibility logic in the Faker
+# progression engine (Day 5) and later in Gold's graduation-rate calculation
+# (fact_institution_kpi) — it lives here, as config, specifically so that
+# business logic ("when should this program's students graduate") is a data
+# fact administrators can review and correct, not a number buried in code.
+#
+# program_level: one of Bachelor | Certificate | Diploma
+
+version: 1
+programs:
+  # ---- College of Architecture (COA) ----
+  - program_id: COA-BSARCH
+    program_name: "Bachelor of Science in Architecture"
+    college_id: COA
+    program_level: Bachelor
+    nominal_duration_years: 5
+  - program_id: COA-CERT-DRAFT
+    program_name: "Certificate in Drafting Technology"
+    college_id: COA
+    program_level: Certificate
+    nominal_duration_years: 1
+  - program_id: COA-CERT-CADD
+    program_name: "Certificate in Computer Aided Design and Drafting"
+    college_id: COA
+    program_level: Certificate
+    nominal_duration_years: 1
+  - program_id: COA-CERT-BUT
+    program_name: "Certificate in Building, Utilities and Technology"
+    college_id: COA
+    program_level: Certificate
+    nominal_duration_years: 1
+
+  # ---- College of Education (COED) ----
+  - program_id: COED-BEED
+    program_name: "Bachelor of Elementary Education"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSED-ENG
+    program_name: "Bachelor of Secondary Education Major in English"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSED-FIL
+    program_name: "Bachelor of Secondary Education Major in Filipino"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSED-MATH
+    program_name: "Bachelor of Secondary Education Major in Mathematics"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSED-SCI
+    program_name: "Bachelor of Secondary Education Major in Science"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSED-SS
+    program_name: "Bachelor of Secondary Education Major in Social Studies"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSED-PHYS
+    program_name: "Bachelor of Secondary Education Major in Physics"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSIE-IA
+    program_name: "Bachelor of Science in Industrial Education Major in Industrial Arts"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BPE
+    program_name: "Bachelor of Physical Education"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BECED
+    program_name: "Bachelor of Early Childhood Education"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BTLED-HE
+    program_name: "Bachelor of Technology and Livelihood Education Major in Home Economics"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-BSNED
+    program_name: "Bachelor of Special Needs Education – Generalist"
+    college_id: COED
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: COED-CERT-PTE
+    program_name: "Certificate in Professional Teacher Education"
+    college_id: COED
+    program_level: Certificate
+    nominal_duration_years: 1
+  - program_id: COED-PBD-ALS
+    program_name: "Post Baccalaureate Diploma in Alternative Learning System"
+    college_id: COED
+    program_level: Diploma
+    nominal_duration_years: 1
+
+  # ---- College of Engineering (COE) ----
+  - program_id: COE-BSCE
+    program_name: "BS Civil Engineering"
+    college_id: COE
+    program_level: Bachelor
+    nominal_duration_years: 5
+  - program_id: COE-BSEE
+    program_name: "BS Electrical Engineering"
+    college_id: COE
+    program_level: Bachelor
+    nominal_duration_years: 5
+  - program_id: COE-BSME
+    program_name: "BS Mechanical Engineering"
+    college_id: COE
+    program_level: Bachelor
+    nominal_duration_years: 5
+
+  # ---- College of Criminology (COC) ----
+  - program_id: COC-BSCRIM
+    program_name: "BS Criminology"
+    college_id: COC
+    program_level: Bachelor
+    nominal_duration_years: 4
+
+  # ---- College of Information and Communications Technology (CICT) ----
+  - program_id: CICT-BSIT-DB
+    program_name: "BS Information Technology - Database Systems"
+    college_id: CICT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CICT-BSIT-NET
+    program_name: "BS Information Technology - Network Systems"
+    college_id: CICT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CICT-BSIT-WEB
+    program_name: "BS Information Technology - Web Systems"
+    college_id: CICT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CICT-BSDS
+    program_name: "BS Data Science"
+    college_id: CICT
+    program_level: Bachelor
+    nominal_duration_years: 4
+
+  # ---- College of Management and Business Technology (CMBT) ----
+  - program_id: CMBT-BSBA-ECON
+    program_name: "BSBA Business Economics"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSBA-BPO
+    program_name: "BSBA Service Management for BPO"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSBA-FM
+    program_name: "BSBA Financial Management"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSBA-HRM
+    program_name: "BSBA Human Resource Management"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSBA-MM
+    program_name: "BSBA Marketing Management"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSENTREP
+    program_name: "BS Entrepreneurship"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSHM
+    program_name: "BS Hospitality Management"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CMBT-BSTM
+    program_name: "BS Tourism Management"
+    college_id: CMBT
+    program_level: Bachelor
+    nominal_duration_years: 4
+
+  # ---- College of Public Administration and Disaster Management (CPADM) ----
+  - program_id: CPADM-BPA
+    program_name: "Bachelor of Public Administration"
+    college_id: CPADM
+    program_level: Bachelor
+    nominal_duration_years: 4
+  - program_id: CPADM-BPA-DRM
+    program_name: "Bachelor of Public Administration Major in Disaster Risk Management"
+    college_id: CPADM
+    program_level: Bachelor
+    nominal_duration_years: 4
+
+  # ---- Institute of Physical Education (IPE) ----
+  - program_id: IPE-CERT-PE
+    program_name: "Certificate in Physical Education"
+    college_id: IPE
+    program_level: Certificate
+    nominal_duration_years: 1

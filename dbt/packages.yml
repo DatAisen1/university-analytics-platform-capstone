@@ -1,0 +1,17 @@
+# dbt/packages.yml
+#
+# dbt_utils provides unique_combination_of_columns, needed for marts whose
+# grain is a composite key (college_key + semester_key, program_key +
+# semester_key) -- dbt's built-in `unique` test only covers a single
+# column. Using the standard package here instead of hand-writing a
+# singular SQL test per composite-grain mart is the more idiomatic dbt
+# approach and avoids re-deriving the same "group by ... having count(*) > 1"
+# pattern five separate times.
+#
+# Installed via direct GitHub source, not the dbt Hub registry
+# (hub.getdbt.com isn't reachable in this sandbox's network allowlist,
+# but github.com/codeload.github.com are).
+
+packages:
+  - git: "https://github.com/dbt-labs/dbt-utils.git"
+    revision: 1.3.0

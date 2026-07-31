@@ -1,0 +1,51 @@
+# data_generator/config/noise_rules.yaml
+#
+# Controls how much realistic messiness gets injected into the CLEAN
+# simulated output (Day 4 + Day 5) before it's treated as a "source system
+# extract" ready for Bronze ingestion (Day 8). A too-clean synthetic
+# dataset would make the Silver validation/quality layer (Day 10-11)
+# pointless to build -- there'd be nothing for it to catch. See
+# docs/08_Faker_Data_Generator.md Section 4 ("Data noise").
+#
+# Scope discipline: noise never touches fields with referential integrity
+# (student_id, program_id, college_id, academic_year, semester_number) --
+# only descriptive text and record-level arrival behavior. See
+# data_generator/rules/noise_injection.py's module docstring.
+
+random_seed: 44   # independent of student generation (42) and progression (43)
+
+# Applied to student_master.csv's home_province field: probability of a
+# single-character swap or drop, simulating manual data-entry typos.
+typo_rate: 0.02
+
+# Probability a given enrollment record is duplicated verbatim within its
+# own partition file -- simulates a registrar re-submitting an extract or
+# a batch job double-firing.
+duplicate_rate: 0.01
+
+# Probability a given enrollment record (from any partition except the
+# last) is ALSO re-emitted, unchanged, into a randomly chosen LATER
+# partition -- simulating a real registrar correcting/resubmitting a
+# prior semester's record after the fact. The row keeps its true
+# academic_year/semester_number (what it's ABOUT); only the file/partition
+# it physically arrives in changes (WHEN it arrived) -- exactly the
+# out-of-order-arrival scenario Silver's dedup-by-natural-key logic
+# (Day 10-11) exists to reconcile, since the underlying data has no
+# separate "ingested_at" field until Bronze stamps one.
+late_correction_rate: 0.03
+
+# Per-true-status weighted text variants a real (inconsistent) SIS export
+# might contain. Each true status's variants must sum to 1.0.
+status_variants:
+  ENROLLED:
+    "ENROLLED": 0.55
+    "Enrolled": 0.20
+    "enrolled": 0.15
+    " ENROLLED ": 0.10
+  GRADUATED:
+    "GRADUATED": 0.85
+    "Graduated": 0.15
+  DROPPED:
+    "DROPPED": 0.80
+    "Dropped": 0.15
+    "DROPPED OUT": 0.05
