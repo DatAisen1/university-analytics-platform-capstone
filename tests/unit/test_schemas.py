@@ -21,15 +21,15 @@ VALID_ROWS = {
     "student": {"student_id": "2021-00001", "cohort_academic_year": "2021-2022", "gender": "Male",
                 "birth_year": 2003, "home_province": "Nueva Ecija", "admission_type": "Freshman",
                 "entry_year_level": 1, "entry_college_id": "COA", "entry_program_id": "COA-BSARCH"},
-    "enrollment": {"student_id": "2021-00001", "academic_year": "2021-2022", "semester_name": "1st Semester",
+    "enrollment": {"student_id": "2021-00001", "academic_year": "2021-2022", "semester_number": 1,
                    "college_id": "COA", "program_id": "COA-BSARCH", "enrollment_status": "ENROLLED",
                    "year_level": 1, "units_enrolled": 18, "is_new_enrollee": True},
-    "graduation": {"student_id": "2021-00001", "academic_year": "2024-2025", "semester_name": "2nd Semester",
+    "graduation": {"student_id": "2021-00001", "academic_year": "2024-2025", "semester_number": 2,
                    "program_id": "COA-BSARCH", "college_id": "COA", "years_to_complete": 4.0},
-    "dropout": {"student_id": "2021-00001", "academic_year": "2022-2023", "semester_name": "1st Semester",
+    "dropout": {"student_id": "2021-00001", "academic_year": "2022-2023", "semester_number": 1,
                 "program_id": "COA-BSARCH", "college_id": "COA", "dropout_reason": "Financial",
                 "semesters_completed_before_dropout": 2},
-    "shifter": {"student_id": "2021-00001", "academic_year": "2021-2022", "semester_name": "2nd Semester",
+    "shifter": {"student_id": "2021-00001", "academic_year": "2021-2022", "semester_number": 2,
                 "from_program_id": "COA-BSARCH", "to_program_id": "CICT-BSDS"},
 }
 
@@ -82,9 +82,9 @@ def test_student_duplicate_student_id_is_caught():
         validate_bronze_dataframe(df, "student")
 
 
-def test_enrollment_invalid_semester_name_is_caught():
+def test_enrollment_invalid_semester_number_is_caught():
     row = dict(VALID_ROWS["enrollment"])
-    row["semester_name"] = "3rd Semester"  # only 1st/2nd Semester are valid
+    row["semester_number"] = 3  # only 1 or 2 are valid
     with pytest.raises(pandera.errors.SchemaErrors):
         validate_bronze_dataframe(pd.DataFrame([row]), "enrollment")
 

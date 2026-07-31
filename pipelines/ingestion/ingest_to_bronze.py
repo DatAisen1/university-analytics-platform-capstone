@@ -7,18 +7,41 @@ project's reference data (colleges/programs), stamps audit metadata, and
 lands everything in Bronze as Parquet -- untransformed, append-only, one
 new batch-tagged file per run, never overwriting a prior ingestion.
 
+Every source unit goes through five explicit, named stages, in order,
+inside `ingest_one`:
+
+    1. READ       -- load_fn() pulls the raw rows (CSV or reference config).
+    2. INSPECT     -- _inspect_schema(): a non-raising snapshot of what
+                       columns/dtypes/row-count we actually received, for
+                       logging/observability. Never a gate.
+    3. NORMALIZE   -- _normalize_column_names(): header hygiene ONLY
+                       (trim whitespace, lowercase). Never touches cell
+                       values and never renames a business column to a
+                       different name -- that would be a data-modeling
+                       decision, which belongs in Silver
+                       (pipelines/silver/cleaning_rules.py), not here.
+    4. VALIDATE    -- _validate_file_level(): the actual gate. Raises
+                       IngestionError on an empty file or missing
+                       required column, which SKIPS the Bronze write
+                       below -- unvalidated data never reaches storage.
+    5. WRITE       -- only validated, normalized-header data is stamped
+                       with audit columns and written to Bronze.
+
 Responsibilities this stage has (and does NOT have -- see
 docs/05_Medallion_Architecture.md Section 2):
   - File-level checks only: does the source exist, is it non-empty, do
     the expected columns look present. NOT per-field schema validation
-    (that's Day 9) and NOT business-rule correctness (that's Day 11).
+    (that's pipelines/common/schemas.py, run as a post-write report --
+    see _run_schema_validation below) and NOT business-rule correctness
+    (that's Silver's job).
   - Stamp metadata: _ingested_at, _source_file, _batch_id.
   - Idempotent: re-running this script skips any (entity, partition_key)
     that already has a SUCCESS row in pipeline_run_log, unless force=True.
-    This is what makes "re-run ingestion, get the same end state" true --
-    core to Day 8's validation checklist.
+    This is what makes "re-run ingestion, get the same end state" true.
 
 Run via: python -m pipelines.ingestion.ingest_to_bronze
+To independently verify what actually landed in Bronze afterward, run:
+    python -m pipelines.ingestion.audit_bronze
 """
 
 from __future__ import annotations
@@ -51,14 +74,24 @@ REQUIRED_COLUMNS = {
     "program": ["program_id", "program_name", "college_id", "program_level", "nominal_duration_years"],
     "student": ["student_id", "cohort_academic_year", "gender", "birth_year", "home_province",
                 "admission_type", "entry_year_level", "entry_college_id", "entry_program_id"],
-    "enrollment": ["student_id", "academic_year", "semester_name", "college_id", "program_id",
+    "enrollment": ["student_id", "academic_year", "semester_number", "college_id", "program_id",
                    "enrollment_status", "year_level", "units_enrolled", "is_new_enrollee"],
-    "graduation": ["student_id", "academic_year", "semester_name", "program_id", "college_id",
+    "graduation": ["student_id", "academic_year", "semester_number", "program_id", "college_id",
                    "years_to_complete"],
-    "dropout": ["student_id", "academic_year", "semester_name", "program_id", "college_id",
+    "dropout": ["student_id", "academic_year", "semester_number", "program_id", "college_id",
                 "dropout_reason", "semesters_completed_before_dropout"],
-    "shifter": ["student_id", "academic_year", "semester_name", "from_program_id", "to_program_id"],
+    "shifter": ["student_id", "academic_year", "semester_number", "from_program_id", "to_program_id"],
 }
+# NOTE: the source CSVs use `semester_number` (int, 1 or 2) -- confirmed
+# against the real data_generator output and against every downstream
+# consumer (pipelines/silver/validate_and_dedupe.py, pipelines/gold/*).
+# An earlier version of this dict required a `semester_name` column that
+# never existed in any source file, which meant every semester-scoped
+# ingestion call (enrollment/graduation/dropout/shifter) failed
+# _validate_file_level unconditionally. Fixed here rather than papered
+# over with a rename in _normalize_column_names, since Bronze must
+# describe the column that was actually received, not one that was
+# merely planned.
 
 
 class IngestionError(Exception):
@@ -66,6 +99,41 @@ class IngestionError(Exception):
     file, or missing expected columns. Distinct from ConfigError (which
     covers config authoring problems) -- this is about the DATA a batch
     was supposed to contain, not the pipeline's own configuration."""
+
+
+def _inspect_schema(df: pd.DataFrame, entity: str, source_path: str) -> Dict[str, object]:
+    """Stage 2: a non-raising snapshot of what a source file actually
+    looks like, taken BEFORE normalization or validation touch it. Pure
+    observability -- 'what columns/dtypes/row-count did we receive?' --
+    never a gate. Missing-column enforcement is _validate_file_level's
+    job, further down the pipeline; this function's only responsibility
+    is to produce a diagnosable snapshot even for a broken file, which is
+    exactly why it must never raise.
+    """
+    return {
+        "entity": entity,
+        "source_path": source_path,
+        "row_count": len(df),
+        "columns": list(df.columns),
+        "dtypes": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+    }
+
+
+def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Stage 3: header hygiene ONLY -- trims incidental whitespace and
+    lowercases column NAMES so a source system's cosmetic quirks
+    (' Student_ID', 'StudentId', 'student_id ') don't masquerade as a
+    missing-column failure at validation. Deliberately does NOT touch
+    cell VALUES (that's Silver's job -- pipelines/silver/cleaning_rules.py)
+    and does NOT rename one business column to another (e.g. mapping a
+    synonym onto student_id): that is a data-modeling decision that
+    belongs in a reviewable, tested Silver mapping rule, not something
+    silently applied at ingestion time. Bronze must still preserve what
+    was received; only whitespace/casing of the header row is fair game.
+    """
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
 
 
 def _validate_file_level(df: pd.DataFrame, entity: str, source_path: str) -> None:
@@ -158,9 +226,20 @@ def ingest_one(
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
     try:
+        # 1. READ
         df = load_fn()
+
+        # 2. INSPECT SCHEMA -- observability snapshot, never raises
+        schema_report = _inspect_schema(df, entity, source_path)
+
+        # 3. NORMALIZE COLUMNS -- header hygiene only, never values
+        df = _normalize_column_names(df)
+
+        # 4. VALIDATE -- the gate. Raises IngestionError -> no write happens.
         _validate_file_level(df, entity, source_path)
         rows_in = len(df)
+
+        # 5. WRITE BRONZE -- only reached once validation has passed
         df = _stamp_audit_columns(df, batch_id, source_path)
         key = _bronze_key(entity, partition_key, batch_id)
         _write_parquet(storage, key, df)
@@ -170,7 +249,8 @@ def ingest_one(
         )
         schema_result = _run_schema_validation(meta_conn, batch_id, entity, partition_key, df, source_path)
         return {"entity": entity, "partition_key": partition_key, "status": "SUCCESS",
-                "rows": rows_in, "key": key, "schema_validation": schema_result["status"]}
+                "rows": rows_in, "key": key, "schema_validation": schema_result["status"],
+                "schema_report": schema_report}
     except (IngestionError, FileNotFoundError) as exc:
         record_run(
             meta_conn, run_id, batch_id, STAGE, entity, partition_key,

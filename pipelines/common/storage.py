@@ -29,10 +29,26 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 from pipelines.common.config import ConfigError
+
+
+@dataclass(frozen=True)
+class ObjectMetadata:
+    """Physical facts about a stored object -- what a Bronze-existence
+    audit needs (Task 19: verify bucket / object path / file name / file
+    size / timestamp), as opposed to trusting that a script exiting
+    without an exception means data landed. `bucket` is None for
+    LocalFileStorage, since a filesystem has no bucket concept."""
+
+    key: str
+    size_bytes: int
+    last_modified: datetime
+    bucket: Optional[str] = None
 
 
 class ObjectStorage(ABC):
@@ -51,6 +67,14 @@ class ObjectStorage(ABC):
 
     @abstractmethod
     def list_keys(self, prefix: str) -> List[str]: ...
+
+    @abstractmethod
+    def stat(self, key: str) -> ObjectMetadata:
+        """Return size/last-modified/bucket for `key` without reading its
+        body. Raises FileNotFoundError if the key does not exist -- the
+        same exception type on every backend, so audit code (Task 19)
+        doesn't need backend-specific except clauses."""
+        ...
 
 
 class LocalFileStorage(ObjectStorage):
@@ -88,6 +112,18 @@ class LocalFileStorage(ObjectStorage):
             str(p.relative_to(self.base_path)).replace(os.sep, "/")
             for p in prefix_path.rglob("*") if p.is_file()
         ]
+
+    def stat(self, key: str) -> ObjectMetadata:
+        path = self._resolve(key)
+        if not path.exists():
+            raise FileNotFoundError(f"No object at key: {key}")
+        info = path.stat()
+        return ObjectMetadata(
+            key=key,
+            size_bytes=info.st_size,
+            last_modified=datetime.fromtimestamp(info.st_mtime, tz=timezone.utc),
+            bucket=None,
+        )
 
 
 class S3Storage(ObjectStorage):
@@ -132,6 +168,22 @@ class S3Storage(ObjectStorage):
             for obj in page.get("Contents", []):
                 keys.append(obj["Key"])
         return keys
+
+    def stat(self, key: str) -> ObjectMetadata:
+        from botocore.exceptions import ClientError
+
+        try:
+            response = self._client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
+                raise FileNotFoundError(f"No object at key: {key}") from exc
+            raise
+        return ObjectMetadata(
+            key=key,
+            size_bytes=response["ContentLength"],
+            last_modified=response["LastModified"],
+            bucket=self.bucket,
+        )
 
 
 def load_minio_storage_from_env(bucket_env_var: str, env: Optional[dict] = None) -> S3Storage:

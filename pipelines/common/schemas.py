@@ -62,7 +62,7 @@ ENROLLMENT_SCHEMA = DataFrameSchema(
     {
         "student_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "academic_year": Column(str, Check.str_length(min_value=1), nullable=False),
-        "semester_name": Column(str, Check.isin(["1st Semester", "2nd Semester"]), nullable=False),
+        "semester_number": Column(int, Check.isin([1, 2]), nullable=False),
         "college_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "program_id": Column(str, Check.str_length(min_value=1), nullable=False),
         # Intentionally NOT isin(["ENROLLED", "GRADUATED", "DROPPED"]) -- see module docstring.
@@ -78,7 +78,7 @@ GRADUATION_SCHEMA = DataFrameSchema(
     {
         "student_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "academic_year": Column(str, Check.str_length(min_value=1), nullable=False),
-        "semester_name": Column(str, Check.isin(["1st Semester", "2nd Semester"]), nullable=False),
+        "semester_number": Column(int, Check.isin([1, 2]), nullable=False),
         "program_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "college_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "years_to_complete": Column(float, Check.gt(0), nullable=False),
@@ -90,7 +90,7 @@ DROPOUT_SCHEMA = DataFrameSchema(
     {
         "student_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "academic_year": Column(str, Check.str_length(min_value=1), nullable=False),
-        "semester_name": Column(str, Check.isin(["1st Semester", "2nd Semester"]), nullable=False),
+        "semester_number": Column(int, Check.isin([1, 2]), nullable=False),
         "program_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "college_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "dropout_reason": Column(str, Check.str_length(min_value=1), nullable=False),
@@ -103,7 +103,7 @@ SHIFTER_SCHEMA = DataFrameSchema(
     {
         "student_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "academic_year": Column(str, Check.str_length(min_value=1), nullable=False),
-        "semester_name": Column(str, Check.isin(["1st Semester", "2nd Semester"]), nullable=False),
+        "semester_number": Column(int, Check.isin([1, 2]), nullable=False),
         "from_program_id": Column(str, Check.str_length(min_value=1), nullable=False),
         "to_program_id": Column(str, Check.str_length(min_value=1), nullable=False),
     },

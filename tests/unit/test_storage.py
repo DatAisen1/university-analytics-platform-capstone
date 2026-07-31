@@ -82,6 +82,32 @@ def test_list_keys_empty_prefix_returns_empty_list(storage):
 
 
 # ---------------------------------------------------------------------------
+# stat() -- physical object metadata for Bronze-existence auditing
+# ---------------------------------------------------------------------------
+
+def test_stat_returns_key_size_and_last_modified(storage):
+    payload = b"hello world"
+    storage.write_bytes("bronze/student/all/data.parquet", payload)
+
+    meta = storage.stat("bronze/student/all/data.parquet")
+
+    assert meta.key == "bronze/student/all/data.parquet"
+    assert meta.size_bytes == len(payload)
+    assert meta.last_modified is not None
+
+
+def test_stat_missing_key_raises_file_not_found(storage):
+    with pytest.raises(FileNotFoundError):
+        storage.stat("bronze/does/not/exist.parquet")
+
+
+def test_stat_zero_byte_object_reports_zero_size(storage):
+    storage.write_bytes("bronze/student/all/empty.parquet", b"")
+    meta = storage.stat("bronze/student/all/empty.parquet")
+    assert meta.size_bytes == 0
+
+
+# ---------------------------------------------------------------------------
 # load_minio_storage_from_env
 # ---------------------------------------------------------------------------
 
