@@ -2,8 +2,52 @@
 pipelines/gold/build_dimensions.py
 
 Builds the Gold star-schema dimension tables from Silver data:
-dim_college, dim_program, dim_academic_year, dim_semester, dim_calendar,
-and dim_student (the one with real SCD Type 2 history).
+dim_college, dim_program, dim_academic_period, dim_calendar, dim_year_level,
+dim_gender, and dim_student (the one with real SCD Type 2 history).
+
+-- Redesign note (Task 23/24 -- Gold Modeling Fix) --------------------------
+This module previously modeled the calendar hierarchy as TWO snowflaked
+tables (dim_academic_year <- dim_semester via academic_year_key) despite
+docs/04_Data_Modeling.md Section 2 explicitly choosing Star over Snowflake
+for this exact reason: "the dimension hierarchies here ... are shallow and
+don't change structure often. Snowflaking would only add join complexity
+for no real storage or integrity benefit." Every fact table's grain is
+per-semester, so every fact query needed the year anyway -- the FK hop
+bought nothing but an extra join. `dim_academic_period` fixes that: one
+denormalized row per (academic_year, semester_number), carrying the year
+attributes flattened in. This is the honest implementation of the star
+schema the design doc already argued for, not a new opinion.
+
+`dim_year_level` and `dim_gender` are new. Previously, `year_level` lived
+as a raw int on fact_enrollment and `gender` as a raw string on
+dim_student -- both correct VALUES, but not modeled as first-class,
+governed dimensions. That meant every consumer (dbt macros, marts,
+dashboard) had to independently reinvent "what does year_level=3 mean"
+(see dbt/macros/year_level_rules.sql's year_level_label_sql, duplicated
+label logic that belongs in exactly one place: the Gold dimension itself).
+Promoting them to real dimensions gives one governed source of labels,
+lets BI tools browse/filter them like any other dimension, and matches
+the same reasoning already applied to dim_college/dim_program: "small,
+low-cardinality, independently meaningful to slice by" -> deserves a
+table. Note deliberately what did NOT come along for the ride: "Super
+Senior" status is NOT baked into dim_year_level as a static label,
+because it isn't a fact about year_level alone -- it depends on the
+student's specific program's nominal_duration_years (year_level 5 is
+"Super Senior" in a 4-year program, on-time in a 5-year one). That
+remains a computed attribute at query/mart time (build_kpi.py's
+`is_eligible_to_graduate`), joining dim_year_level's numeric value
+against dim_program.nominal_duration_years -- exactly the same pattern
+already used there. Forcing it into dim_year_level would silently make a
+program-relative fact look like a program-independent one.
+
+`dim_student` also now stores `college_key`/`program_key` (surrogate FKs)
+instead of raw `college_id`/`program_id` strings. Every OTHER dimension in
+this model uses surrogate keys as its FK contract (docs/04_Data_Modeling.md
+Section 5); dim_student silently breaking that contract for its own
+program/college attributes was an inconsistency, not a deliberate
+design choice -- fixed here, not left as a footgun for the first analyst
+who assumes ALL cross-dimension references in this warehouse are surrogate
+keys (a safe assumption everywhere else).
 
 A note on tooling choice, since this project has been deliberate about
 "DuckDB SQL for transforms" everywhere else: dim_student's SCD2
@@ -13,18 +57,6 @@ what SQL is good at. SCD2 history-building is inherently SEQUENTIAL per
 student (open a row, watch for a shift event, close the row, open the
 next one) -- forcing that into a single window-function SQL expression
 would trade clarity for a stylistic consistency that isn't worth it here.
-Using the right tool per sub-problem, not the same tool everywhere, is
-the actual engineering judgment; see docs/07_Technology_Stack.md's
-broader "match tool complexity to the problem" theme.
-
-A second adaptation from the original design doc worth being explicit
-about: docs/04_Data_Modeling.md originally specified `_valid_from DATE`/
-`_valid_to DATE` for dim_student's SCD2 columns. This project has no
-literal date fields anywhere in its model -- only academic_year +
-semester_number. So SCD2 validity here is expressed as
-`_valid_from_semester_key` / `_valid_to_semester_key`, both FKs into
-dim_semester, which is the honest equivalent given what the data actually
-contains, not a deviation for its own sake.
 
 Postgres is not running in this environment (no Docker daemon -- see
 Day 2's note). Gold tables are written to warehouse/gold_store/ as
@@ -54,6 +86,29 @@ STAGE = "gold_build_dimensions"
 
 ACADEMIC_YEARS = [2021, 2022, 2023, 2024]
 
+# Governed year_level domain and labels. Only years 1-6 are observed in
+# Silver today, but the dimension is intentionally built to cover the full
+# nominal range any program in dim_program can produce (max
+# nominal_duration_years == 5) plus one extra year of headroom for a
+# single stalled/extended semester, rather than being derived reactively
+# from "whatever values happen to be in today's Silver snapshot" -- a
+# dimension whose domain silently shrinks or grows with each data refresh
+# is a correctness hazard for any BI tool that caches it.
+YEAR_LEVEL_LABELS: Dict[int, str] = {
+    1: "Freshman",
+    2: "Sophomore",
+    3: "Junior",
+    4: "Senior",
+    5: "Fifth Year",
+    6: "Sixth Year",
+}
+
+# Governed gender domain, matching pipelines/silver/clean_entities.py's
+# VALID_GENDERS controlled vocabulary. Defined once, here, as the single
+# source of truth for the surrogate key <-> code mapping every fact and
+# every downstream mart/dashboard must agree on.
+GENDER_CODES: List[str] = ["Female", "Male"]
+
 
 def _read_parquet(storage: ObjectStorage, key: str) -> pd.DataFrame:
     return pd.read_parquet(io.BytesIO(storage.read_bytes(key)))
@@ -65,7 +120,12 @@ def _write_parquet(storage: ObjectStorage, key: str, df: pd.DataFrame) -> None:
     storage.write_bytes(key, buffer.getvalue())
 
 
-def semester_ordinal(academic_year: int, semester_number: int) -> int:
+def period_ordinal(academic_year: int, semester_number: int) -> int:
+    """0-based chronological ordinal across the whole modeled date range.
+    Used for "next period" arithmetic (fact_retention, KPI momentum) --
+    kept as an explicit column on dim_academic_period rather than an
+    assumption baked into how surrogate keys happen to be assigned.
+    """
     return (academic_year - 2021) * 2 + (semester_number - 1)
 
 
@@ -73,39 +133,40 @@ def semester_ordinal(academic_year: int, semester_number: int) -> int:
 # Static / derived dimensions (no Silver source -- these are structural)
 # ---------------------------------------------------------------------------
 
-def build_dim_academic_year() -> pd.DataFrame:
-    rows = [
-        {"academic_year_key": i + 1, "year_label": f"{y}-{y+1}", "start_year": y, "end_year": y + 1}
-        for i, y in enumerate(ACADEMIC_YEARS)
-    ]
-    return pd.DataFrame(rows)
-
-
-def build_dim_semester(dim_academic_year: pd.DataFrame) -> pd.DataFrame:
-    year_key_by_year = dict(zip(dim_academic_year["start_year"], dim_academic_year["academic_year_key"]))
+def build_dim_academic_period() -> pd.DataFrame:
+    """One denormalized row per (academic_year, semester_number). Replaces
+    the old dim_academic_year + dim_semester snowflake pair -- see module
+    docstring for why. `academic_period_key` is assigned in chronological
+    order and therefore always equals `period_ordinal + 1`; `period_ordinal`
+    is still stored explicitly so callers needing "next period" arithmetic
+    document that intent rather than relying on an unstated key-ordering
+    assumption.
+    """
     rows = []
     key = 1
     for y in ACADEMIC_YEARS:
         for s in (1, 2):
             rows.append({
-                "semester_key": key,
-                "semester_id": f"{y}-{s}",
+                "academic_period_key": key,
                 "academic_year": y,
                 "semester_number": s,
-                "academic_year_key": year_key_by_year[y],
+                "year_label": f"{y}-{y + 1}",
+                "semester_label": "1st Semester" if s == 1 else "2nd Semester",
+                "period_label": f"{y}-{y + 1} \u00b7 {'1st' if s == 1 else '2nd'} Semester",
+                "period_ordinal": period_ordinal(y, s),
             })
             key += 1
     return pd.DataFrame(rows)
 
 
-def semester_key_lookup(dim_semester: pd.DataFrame) -> Dict[tuple, int]:
+def academic_period_key_lookup(dim_academic_period: pd.DataFrame) -> Dict[tuple, int]:
     return {
-        (row["academic_year"], row["semester_number"]): row["semester_key"]
-        for _, row in dim_semester.iterrows()
+        (row["academic_year"], row["semester_number"]): row["academic_period_key"]
+        for _, row in dim_academic_period.iterrows()
     }
 
 
-def build_dim_calendar(dim_semester: pd.DataFrame) -> pd.DataFrame:
+def build_dim_calendar(dim_academic_period: pd.DataFrame) -> pd.DataFrame:
     """A day-grain calendar dimension for 2021-01-01 through 2024-12-31.
 
     Disclosed simplification: the project brief specifies academic years
@@ -117,7 +178,7 @@ def build_dim_calendar(dim_semester: pd.DataFrame) -> pd.DataFrame:
     deployment would replace this assumption with the institution's
     actual registrar calendar.
     """
-    semester_key_by = semester_key_lookup(dim_semester)
+    period_key_by = academic_period_key_lookup(dim_academic_period)
     dates = pd.date_range("2021-01-01", "2024-12-31", freq="D")
 
     rows = []
@@ -134,9 +195,40 @@ def build_dim_calendar(dim_semester: pd.DataFrame) -> pd.DataFrame:
             "day": d.day,
             "is_semester_start": is_start,
             "is_semester_end": is_end,
-            "semester_key": semester_key_by[(d.year, semester_number)],
-            "academic_year": d.year,
+            "academic_period_key": period_key_by[(d.year, semester_number)],
         })
+    return pd.DataFrame(rows)
+
+
+def build_dim_year_level() -> pd.DataFrame:
+    """Governed year_level dimension. Surrogate key is a plain
+    auto-increment, kept independent of the natural `year_level` int even
+    though the two happen to align 1:1 today -- see docs/04_Data_Modeling.md
+    Section 5 on why surrogate keys are used uniformly, not just where a
+    natural key happens to be inconvenient.
+    """
+    rows = [
+        {"year_level_key": key, "year_level": year_level, "year_level_label": label}
+        for key, (year_level, label) in enumerate(sorted(YEAR_LEVEL_LABELS.items()), start=1)
+    ]
+    return pd.DataFrame(rows)
+
+
+def build_dim_gender() -> pd.DataFrame:
+    """Governed gender dimension -- two rows, deliberately still modeled
+    as a real dimension rather than folded into a junk dimension. Unlike
+    the flags in docs/04_Data_Modeling.md's `dim_enrollment_status_flags`
+    junk dimension (booleans almost never queried independently), gender
+    IS routinely queried and grouped on independently (parity/equity
+    reporting -- see dbt/models/marts/mart_canonical_dataset.sql's
+    group-by grain). A dimension that's actually a first-class slicing
+    axis earns its own table even at low cardinality; a dimension that's
+    just incidental metadata is the one that belongs in a junk table.
+    """
+    rows = [
+        {"gender_key": key, "gender_code": code, "gender_label": code}
+        for key, code in enumerate(GENDER_CODES, start=1)
+    ]
     return pd.DataFrame(rows)
 
 
@@ -164,14 +256,25 @@ def build_dim_program(program_df: pd.DataFrame, dim_college: pd.DataFrame) -> pd
 # ---------------------------------------------------------------------------
 
 def build_dim_student(
-    student_df: pd.DataFrame, shifter_df: pd.DataFrame, dim_semester: pd.DataFrame
+    student_df: pd.DataFrame,
+    shifter_df: pd.DataFrame,
+    dim_academic_period: pd.DataFrame,
+    dim_gender: pd.DataFrame,
+    dim_college: pd.DataFrame,
+    dim_program: pd.DataFrame,
 ) -> pd.DataFrame:
     """Build the full SCD2 history for every student: one row per distinct
     (program) period they were in, opened/closed at shift-event
     boundaries. A student with zero shift events gets exactly one row,
-    open-ended (_is_current=True, _valid_to_semester_key=None).
+    open-ended (_is_current=True, _valid_to_period_key=None).
+
+    Emits surrogate FKs (gender_key, college_key, program_key) instead of
+    raw source values/natural keys -- see module docstring.
     """
-    sem_key = semester_key_lookup(dim_semester)
+    period_key = academic_period_key_lookup(dim_academic_period)
+    gender_key_by_code = dict(zip(dim_gender["gender_code"], dim_gender["gender_key"]))
+    college_key_by_id = dict(zip(dim_college["college_id"], dim_college["college_key"]))
+    program_key_by_id = dict(zip(dim_program["program_id"], dim_program["program_key"]))
 
     shifts_by_student: Dict[str, List[dict]] = {}
     for _, row in shifter_df.sort_values(["academic_year", "semester_number"]).iterrows():
@@ -181,13 +284,13 @@ def build_dim_student(
     for _, student in student_df.iterrows():
         sid = student["student_id"]
         entry_year = int(student["cohort_academic_year"])
-        entry_ordinal = semester_ordinal(entry_year, 1)
+        entry_ordinal = period_ordinal(entry_year, 1)
         current_program_id = student["entry_program_id"]
         current_college_id = student["entry_college_id"]
-        valid_from_key = sem_key[(entry_year, 1)]
+        valid_from_key = period_key[(entry_year, 1)]
 
         for shift in shifts_by_student.get(sid, []):
-            shift_ordinal = semester_ordinal(int(shift["academic_year"]), int(shift["semester_number"]))
+            shift_ordinal = period_ordinal(int(shift["academic_year"]), int(shift["semester_number"]))
 
             if shift_ordinal == entry_ordinal:
                 # The shift happens in the student's very first observed
@@ -205,28 +308,38 @@ def build_dim_student(
             close_ordinal = shift_ordinal - 1
             close_year = 2021 + close_ordinal // 2
             close_sem = (close_ordinal % 2) + 1
-            valid_to_key = sem_key.get((close_year, close_sem))
+            valid_to_key = period_key.get((close_year, close_sem))
 
             all_rows.append({
-                "student_id": sid, "gender": student["gender"], "birth_year": student["birth_year"],
-                "home_province": student["home_province"], "admission_type": student["admission_type"],
-                "college_id": current_college_id, "program_id": current_program_id,
-                "_valid_from_semester_key": valid_from_key, "_valid_to_semester_key": valid_to_key,
+                "student_id": sid,
+                "gender_key": gender_key_by_code[student["gender"]],
+                "birth_year": student["birth_year"],
+                "home_province": student["home_province"],
+                "admission_type": student["admission_type"],
+                "college_key": college_key_by_id[current_college_id],
+                "program_key": program_key_by_id[current_program_id],
+                "_valid_from_period_key": valid_from_key,
+                "_valid_to_period_key": valid_to_key,
                 "_is_current": False,
             })
 
             current_program_id = shift["to_program_id"]
-            valid_from_key = sem_key[(int(shift["academic_year"]), int(shift["semester_number"]))]
+            valid_from_key = period_key[(int(shift["academic_year"]), int(shift["semester_number"]))]
             # college_id may or may not change with the shift -- to_program_id could be in a
             # different college; resolved by the caller joining against dim_program if needed.
             # Here we keep tracking via program_id's own college through the program dimension
             # rather than duplicating that lookup inline.
 
         all_rows.append({
-            "student_id": sid, "gender": student["gender"], "birth_year": student["birth_year"],
-            "home_province": student["home_province"], "admission_type": student["admission_type"],
-            "college_id": current_college_id, "program_id": current_program_id,
-            "_valid_from_semester_key": valid_from_key, "_valid_to_semester_key": None,
+            "student_id": sid,
+            "gender_key": gender_key_by_code[student["gender"]],
+            "birth_year": student["birth_year"],
+            "home_province": student["home_province"],
+            "admission_type": student["admission_type"],
+            "college_key": college_key_by_id[current_college_id],
+            "program_key": program_key_by_id[current_program_id],
+            "_valid_from_period_key": valid_from_key,
+            "_valid_to_period_key": None,
             "_is_current": True,
         })
 
@@ -257,17 +370,21 @@ def build_all_dimensions(
     student_df = _read_parquet(silver_storage, "silver/student/data.parquet")
     shifter_df = _read_parquet(silver_storage, "silver/shifter/data.parquet")
 
-    dim_academic_year = build_dim_academic_year()
-    dim_semester = build_dim_semester(dim_academic_year)
-    dim_calendar = build_dim_calendar(dim_semester)
+    dim_academic_period = build_dim_academic_period()
+    dim_calendar = build_dim_calendar(dim_academic_period)
+    dim_year_level = build_dim_year_level()
+    dim_gender = build_dim_gender()
     dim_college = build_dim_college(college_df)
     dim_program = build_dim_program(program_df, dim_college)
-    dim_student = build_dim_student(student_df, shifter_df, dim_semester)
+    dim_student = build_dim_student(
+        student_df, shifter_df, dim_academic_period, dim_gender, dim_college, dim_program
+    )
 
     tables = {
-        "dim_academic_year": dim_academic_year,
-        "dim_semester": dim_semester,
+        "dim_academic_period": dim_academic_period,
         "dim_calendar": dim_calendar,
+        "dim_year_level": dim_year_level,
+        "dim_gender": dim_gender,
         "dim_college": dim_college,
         "dim_program": dim_program,
         "dim_student": dim_student,

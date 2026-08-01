@@ -88,6 +88,52 @@ def record_run(
     )
 
 
+def record_success_once(
+    conn: duckdb.DuckDBPyConnection,
+    run_id: str,
+    batch_id: str,
+    stage: str,
+    entity: str,
+    partition_key: str,
+    started_at: datetime,
+    rows_in: int = 0,
+    rows_out: int = 0,
+    source_path: str = "",
+) -> bool:
+    """Task 26 hardening: has_successful_run() + record_run(status='SUCCESS')
+    called separately (as ingest_to_bronze.py does today) is a
+    check-then-act race -- two concurrent processes can both see "not yet
+    successful" and both insert a SUCCESS row for the same (stage, entity,
+    partition_key). DuckDB's embedded, single-writer-at-a-time model makes
+    that race very unlikely in this project's actual usage, but it's not
+    IMPOSSIBLE, and it's exactly the class of bug a database uniqueness
+    constraint exists to rule out entirely rather than merely make
+    unlikely.
+
+    This wraps the check and the insert in one transaction and re-checks
+    immediately before writing, so at most one SUCCESS row can ever be
+    committed per (stage, entity, partition_key) even under concurrent
+    callers. Returns True if this call recorded the success, False if
+    another (successful) run already had -- callers can use the return
+    value the same way they'd use has_successful_run()'s result today.
+    """
+    conn.begin()
+    try:
+        already = has_successful_run(conn, stage, entity, partition_key)
+        if already:
+            conn.rollback()
+            return False
+        record_run(
+            conn, run_id, batch_id, stage, entity, partition_key,
+            started_at, status="SUCCESS", rows_in=rows_in, rows_out=rows_out, source_path=source_path,
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def get_run_log(conn: duckdb.DuckDBPyConnection):
     """Returns the full run log as a DataFrame -- 'show me every batch
     that quarantined more than 5% of rows' (docs/03) is exactly the kind

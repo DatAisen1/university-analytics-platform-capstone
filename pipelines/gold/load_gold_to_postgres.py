@@ -34,8 +34,13 @@ from pipelines.common.storage import LocalFileStorage, ObjectStorage
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GOLD_STORAGE_PATH = _REPO_ROOT / "warehouse" / "gold_store"
 
+# Task 23/24 Gold Modeling Fix: dim_academic_year + dim_semester (snowflaked)
+# replaced by the single denormalized dim_academic_period; dim_year_level
+# and dim_gender added as newly-governed conformed dimensions. See
+# pipelines/gold/build_dimensions.py's module docstring for the rationale.
 GOLD_TABLES = [
-    "dim_academic_year", "dim_semester", "dim_calendar", "dim_college", "dim_program", "dim_student",
+    "dim_academic_period", "dim_calendar", "dim_year_level", "dim_gender", "dim_college",
+    "dim_program", "dim_student",
     "fact_enrollment", "fact_graduation", "fact_dropout", "fact_shifter", "fact_retention",
     "fact_institution_kpi",
 ]
@@ -64,6 +69,10 @@ def load_gold_to_postgres(
     -- see that function's docstring for why this must never be a naive
     DROP-based 'replace'.
     """
+    from pipelines.common.migrations import assert_up_to_date
+
+    assert_up_to_date(engine.raw_connection())  # Task 25: fail loudly, not via a silent to_sql table
+
     gold_storage = gold_storage or LocalFileStorage(DEFAULT_GOLD_STORAGE_PATH)
     tables = tables or GOLD_TABLES
 

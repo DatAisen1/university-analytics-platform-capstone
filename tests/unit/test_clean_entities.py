@@ -152,3 +152,110 @@ def test_clean_all_tags_unrecognized_status_as_unknown_not_dropped(tmp_path):
     assert results[0]["unknown_status_count"] == 1
     silver_df = pd.read_parquet(io.BytesIO(silver_storage.read_bytes("silver/enrollment/data.parquet")))
     assert silver_df.iloc[0]["enrollment_status"] == "UNKNOWN:SUSPENDED"
+
+
+# ---------------------------------------------------------------------------
+# Task 20: categorical standardization, type conversion, duplicate handling,
+# academic-year / semester normalization
+# ---------------------------------------------------------------------------
+
+def test_clean_all_standardizes_gender_casing_and_reports_unknowns(tmp_path):
+    storage = LocalFileStorage(tmp_path / "bronze_store")
+    students = pd.DataFrame([
+        {"student_id": "2021-00001", "cohort_academic_year": 2021, "gender": "male", "birth_year": 2003,
+         "home_province": "Nueva Ecija", "admission_type": "Freshman", "entry_year_level": 1,
+         "entry_college_id": "COA", "entry_program_id": "COA-BSARCH"},
+        {"student_id": "2021-00002", "cohort_academic_year": 2021, "gender": "Other", "birth_year": 2003,
+         "home_province": "Nueva Ecija", "admission_type": "Freshman", "entry_year_level": 1,
+         "entry_college_id": "COA", "entry_program_id": "COA-BSARCH"},
+    ])
+    _write_bronze_parquet(storage, "bronze/student/all/batch_id=b1/data.parquet", students)
+
+    silver_storage = LocalFileStorage(tmp_path / "silver_store")
+    meta_conn = get_connection(tmp_path / "meta.duckdb")
+    results = clean_all(bronze_storage=storage, silver_storage=silver_storage, meta_conn=meta_conn, entities=["student"])
+
+    assert results[0]["unknown_category_count"] == 1
+    silver_df = pd.read_parquet(io.BytesIO(silver_storage.read_bytes("silver/student/data.parquet")))
+    genders = dict(zip(silver_df["student_id"], silver_df["gender"]))
+    assert genders["2021-00001"] == "Male"
+    assert genders["2021-00002"] == "UNKNOWN:Other"
+
+
+def test_clean_all_coerces_types_to_canonical_silver_dtypes(fixture_bronze, tmp_path):
+    silver_storage = LocalFileStorage(tmp_path / "silver_store")
+    meta_conn = get_connection(tmp_path / "meta.duckdb")
+
+    clean_all(
+        bronze_storage=fixture_bronze, silver_storage=silver_storage, meta_conn=meta_conn,
+        entities=["enrollment"],
+    )
+
+    silver_df = pd.read_parquet(io.BytesIO(silver_storage.read_bytes("silver/enrollment/data.parquet")))
+    assert str(silver_df["academic_year"].dtype) == "Int64"
+    assert str(silver_df["semester_number"].dtype) == "Int64"
+    assert str(silver_df["units_enrolled"].dtype) == "Int64"
+    assert str(silver_df["is_new_enrollee"].dtype) == "boolean"
+    assert str(silver_df["student_id"].dtype) == "string"
+
+
+def test_clean_all_drops_exact_duplicate_rows_keeping_latest(tmp_path):
+    storage = LocalFileStorage(tmp_path / "bronze_store")
+    # Same business data written twice (e.g. an idempotent re-run that
+    # somehow produced two Bronze batches) -- only audit columns differ.
+    college_batch_1 = pd.DataFrame([{
+        "college_id": "COA", "college_name": "College of Architecture",
+        "_ingested_at": pd.Timestamp("2024-01-01", tz="UTC"), "_source_file": "colleges.yaml", "_batch_id": "b1",
+    }])
+    college_batch_2 = pd.DataFrame([{
+        "college_id": "COA", "college_name": "College of Architecture",
+        "_ingested_at": pd.Timestamp("2024-01-02", tz="UTC"), "_source_file": "colleges.yaml", "_batch_id": "b2",
+    }])
+    _write_bronze_parquet(storage, "bronze/college/all/batch_id=b1/data.parquet", college_batch_1)
+    _write_bronze_parquet(storage, "bronze/college/all/batch_id=b2/data.parquet", college_batch_2)
+
+    silver_storage = LocalFileStorage(tmp_path / "silver_store")
+    meta_conn = get_connection(tmp_path / "meta.duckdb")
+    results = clean_all(bronze_storage=storage, silver_storage=silver_storage, meta_conn=meta_conn, entities=["college"])
+
+    assert results[0]["rows"] == 1
+    assert results[0]["duplicates_dropped"] == 1
+    silver_df = pd.read_parquet(io.BytesIO(silver_storage.read_bytes("silver/college/data.parquet")))
+    assert len(silver_df) == 1
+    assert silver_df.iloc[0]["_batch_id"] == "b2"  # the later-ingested copy survives
+
+
+def test_clean_all_normalizes_academic_year_label_to_canonical_int(tmp_path):
+    """A cohort_academic_year value that arrives as a '2021-2022'-style
+    label must be normalized to the plain int 2021 that Gold and the
+    rest of Silver already key on -- not left as a label, and not
+    dropped."""
+    storage = LocalFileStorage(tmp_path / "bronze_store")
+    students = pd.DataFrame([{
+        "student_id": "2021-00001", "cohort_academic_year": "2021-2022", "gender": "Male", "birth_year": 2003,
+        "home_province": "Nueva Ecija", "admission_type": "Freshman", "entry_year_level": 1,
+        "entry_college_id": "COA", "entry_program_id": "COA-BSARCH",
+    }])
+    _write_bronze_parquet(storage, "bronze/student/all/batch_id=b1/data.parquet", students)
+
+    silver_storage = LocalFileStorage(tmp_path / "silver_store")
+    meta_conn = get_connection(tmp_path / "meta.duckdb")
+    clean_all(bronze_storage=storage, silver_storage=silver_storage, meta_conn=meta_conn, entities=["student"])
+
+    silver_df = pd.read_parquet(io.BytesIO(silver_storage.read_bytes("silver/student/data.parquet")))
+    assert int(silver_df.iloc[0]["cohort_academic_year"]) == 2021
+
+
+def test_clean_all_reports_schema_validation_status(fixture_bronze, tmp_path):
+    """Task 21: clean_all's per-entity result now reports whether the
+    Silver output passed pipelines/common/silver_schemas.py."""
+    silver_storage = LocalFileStorage(tmp_path / "silver_store")
+    meta_conn = get_connection(tmp_path / "meta.duckdb")
+
+    results = clean_all(
+        bronze_storage=fixture_bronze, silver_storage=silver_storage, meta_conn=meta_conn,
+        entities=["college", "program", "student", "enrollment"],
+    )
+
+    for result in results:
+        assert result["schema_validation"] == "SCHEMA_VALID"

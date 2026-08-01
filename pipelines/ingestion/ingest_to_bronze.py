@@ -55,7 +55,7 @@ from typing import Callable, Dict, List, Optional
 import pandas as pd
 
 from pipelines.common.config import ReferenceData, load_default_reference_data
-from pipelines.common.metadata import get_connection, has_successful_run, record_run
+from pipelines.common.metadata import get_connection, has_successful_run, record_run, record_success_once
 from pipelines.common.schemas import validate_bronze_dataframe
 from pipelines.common.storage import LocalFileStorage, ObjectStorage
 
@@ -243,9 +243,9 @@ def ingest_one(
         df = _stamp_audit_columns(df, batch_id, source_path)
         key = _bronze_key(entity, partition_key, batch_id)
         _write_parquet(storage, key, df)
-        record_run(
+        record_success_once(
             meta_conn, run_id, batch_id, STAGE, entity, partition_key,
-            started_at, status="SUCCESS", rows_in=rows_in, rows_out=len(df), source_path=source_path,
+            started_at, rows_in=rows_in, rows_out=len(df), source_path=source_path,
         )
         schema_result = _run_schema_validation(meta_conn, batch_id, entity, partition_key, df, source_path)
         return {"entity": entity, "partition_key": partition_key, "status": "SUCCESS",

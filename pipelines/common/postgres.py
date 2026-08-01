@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import psycopg2
 
@@ -93,49 +93,81 @@ def bootstrap_roles(admin_conn, passwords: Dict[str, str]) -> None:
             )
 
 
-def apply_schema_ddl(admin_conn) -> None:
-    """Run 001_create_schemas.sql and 002_grants.sql, in order. Assumes
-    roles already exist (bootstrap_roles must run first -- 002_grants.sql
-    references role names that must already be valid)."""
-    admin_conn.autocommit = True
-    with admin_conn.cursor() as cur:
-        for ddl_file in ["001_create_schemas.sql", "002_grants.sql"]:
-            sql = (DDL_DIR / ddl_file).read_text()
-            cur.execute(sql)
+def apply_schema_ddl(admin_conn) -> List[str]:
+    """Run every migration in warehouse/ddl/ that hasn't been applied yet,
+    in numeric order (Task 25 fix). Assumes roles already exist
+    (bootstrap_roles must run first -- 002_grants.sql references role
+    names that must already be valid).
+
+    Previously this hardcoded exactly ["001_create_schemas.sql",
+    "002_grants.sql"], which meant 003_gold_star_schema.sql (and any
+    later constraint-defining file) was silently never executed --
+    the root cause of missing constraints such as
+    uq_gold_dim_program_program_id / uq_silver_program_program_id (see
+    pipelines/common/migrations.py's module docstring for the full
+    story). Now every file under warehouse/ddl/ is a tracked migration
+    and this function is the single entry point that applies all of
+    them, idempotently.
+    """
+    from pipelines.common.migrations import apply_migrations
+
+    return apply_migrations(admin_conn, ddl_dir=DDL_DIR)
 
 
-def bootstrap_warehouse(passwords: Dict[str, str], env: Optional[dict] = None) -> None:
-    """Full Day 15 bootstrap: create roles, then schemas, then grants.
-    Idempotent -- safe to re-run against an already-bootstrapped database."""
+def bootstrap_warehouse(passwords: Dict[str, str], env: Optional[dict] = None) -> List[str]:
+    """Full warehouse bootstrap: create roles, then apply every migration
+    (schemas, grants, Gold DDL, Silver DDL, constraint retrofits, ...).
+    Idempotent -- safe to re-run against an already-bootstrapped database
+    (Task 26/27: this is exactly what makes 'run migrations again' safe
+    on every deploy, not just the first one).
+    """
     conn = get_admin_connection(env)
     try:
         bootstrap_roles(conn, passwords)
-        apply_schema_ddl(conn)
+        return apply_schema_ddl(conn)
     finally:
         conn.close()
+
+
+class MissingTableError(RuntimeError):
+    """Raised when a Gold/Silver writer targets a table that doesn't
+    exist yet. This means migrations haven't been applied -- see
+    pipelines.common.migrations.apply_migrations(). Deliberately NOT
+    auto-created here: that's the exact bug this task fixes (pandas'
+    `to_sql(if_exists='replace')` used to silently create a
+    constraint-less table on first load, which is how PK/FK/UNIQUE/
+    NOT NULL constraints went missing on a clean database)."""
 
 
 def replace_table_contents(engine, schema: str, table_name: str, df) -> None:
     """Write `df` into `schema.table_name`, replacing its entire contents.
 
-    Uses TRUNCATE + append for tables that already exist, NOT pandas'
-    `if_exists='replace'` (DROP TABLE + CREATE) -- Postgres refuses to
-    DROP a table with dependent views (e.g. a dbt staging view built on
-    top of it), so a naive replace breaks the very next reload after the
-    first `dbt run`. This is the exact bug found and fixed in
-    pipelines/gold/load_gold_to_postgres.py on Day 16
-    (docs/07_Technology_Stack.md's dbt section has the full story);
-    factored out here so every Gold/ML writer shares one tested
-    implementation instead of re-deriving the same fix independently.
+    Uses TRUNCATE + append -- NOT pandas' `if_exists='replace'` (DROP
+    TABLE + CREATE), because Postgres refuses to DROP a table with
+    dependent views (e.g. a dbt staging view built on top of it), so a
+    naive replace breaks the very next reload after the first `dbt run`.
+
+    Task 25 fix: the table must already exist (created by a tracked
+    migration in warehouse/ddl/, with its full set of constraints) --
+    this function will NOT fall back to creating it via `to_sql`
+    anymore. A missing table is now a loud MissingTableError, not a
+    silent constraint-less table. Run
+    `pipelines.common.migrations.apply_migrations()` (or the warehouse
+    bootstrap) before calling this.
     """
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names(schema=schema))
 
-    if table_name in existing_tables:
-        with engine.begin() as conn:
-            conn.execute(text(f'TRUNCATE TABLE {schema}."{table_name}"'))
-        df.to_sql(table_name, engine, schema=schema, if_exists="append", index=False)
-    else:
-        df.to_sql(table_name, engine, schema=schema, if_exists="replace", index=False)
+    if table_name not in existing_tables:
+        raise MissingTableError(
+            f"{schema}.{table_name} does not exist. Apply migrations "
+            f"(pipelines.common.migrations.apply_migrations) before loading data -- "
+            f"tables must be created by tracked DDL, with their full constraints, "
+            f"never implicitly by pandas.to_sql."
+        )
+
+    with engine.begin() as conn:
+        conn.execute(text(f'TRUNCATE TABLE {schema}."{table_name}"'))
+    df.to_sql(table_name, engine, schema=schema, if_exists="append", index=False)

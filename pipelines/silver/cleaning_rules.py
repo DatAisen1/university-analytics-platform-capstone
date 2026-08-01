@@ -16,6 +16,8 @@ dashboard actually consume.
 
 from __future__ import annotations
 
+from typing import Callable, FrozenSet
+
 KNOWN_STATUSES = {"ENROLLED", "GRADUATED", "DROPPED"}
 
 
@@ -56,3 +58,78 @@ def clean_text(raw):
     the cleaning function silently making a decision that belongs to
     schema validation, not text hygiene."""
     return raw.strip() if isinstance(raw, str) else raw
+
+
+def make_categorical_normalizer(known_values: FrozenSet[str]) -> Callable[[object], object]:
+    """Build a case-insensitive normalizer for a small controlled-
+    vocabulary column (gender, admission_type, program_level, ...).
+
+    Bug fix: pipelines/silver/clean_entities.py has always imported this
+    function (Stage 3, CATEGORICAL STANDARDIZATION) but it was never
+    actually defined here, which meant importing clean_entities.py -- and
+    therefore running Silver cleaning at all -- raised ImportError. This
+    is that missing implementation.
+
+    Returns a function suitable for registering as a DuckDB scalar UDF:
+    case-folds any casing variant of a known value onto its canonical
+    spelling, and tags anything unrecognized 'UNKNOWN:<raw>' rather than
+    dropping or raising -- the same non-raising, tag-don't-reject pattern
+    normalize_enrollment_status_safe already established for
+    enrollment_status, so callers/quarantine logic can treat every
+    categorical column consistently.
+    """
+    lookup = {v.upper(): v for v in known_values}
+
+    def _normalize(raw):
+        cleaned = str(raw).strip().upper()
+        return lookup.get(cleaned, f"UNKNOWN:{raw}")
+
+    return _normalize
+
+
+def normalize_null_like(raw):
+    """Turn an empty-or-whitespace-only string into a real null; every
+    other value (including non-strings) passes through unchanged. This
+    is the same "empty string after trimming means no value" rule
+    clean_entities.py's Stage 2 already applies inline via SQL
+    (NULLIF(TRIM(...), '')); exposed here as a plain Python function so
+    it's independently unit-testable and reusable outside a DuckDB SELECT.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip() == "":
+        return None
+    return raw
+
+
+def normalize_semester_number(raw) -> int:
+    """Map a semester_number value to the canonical int (1 or 2),
+    accepting a plain int, a numeric string, or a '1st/2nd Semester'-
+    style label with incidental whitespace/casing. Raises ValueError for
+    anything else (None, 0, 3+, unparseable text) -- callers that need a
+    non-raising version for bulk cleaning should use
+    normalize_semester_number_safe instead, the same raising/safe split
+    normalize_enrollment_status already establishes.
+    """
+    if raw is None:
+        raise ValueError("Unrecognized semester value: None")
+    text = str(raw).strip().lower()
+    if text in ("1", "2"):
+        return int(text)
+    if text.startswith("1st"):
+        return 1
+    if text.startswith("2nd"):
+        return 2
+    raise ValueError(f"Unrecognized semester value: {raw!r}")
+
+
+def normalize_semester_number_safe(raw):
+    """Non-raising variant: an unrecognized value is returned UNCHANGED
+    (not tagged, not nulled) so a downstream dtype-coercion failure count
+    or business-rule check can catch it -- never a fabricated guess about
+    what an unparseable semester value "really" meant.
+    """
+    try:
+        return normalize_semester_number(raw)
+    except ValueError:
+        return raw

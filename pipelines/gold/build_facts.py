@@ -2,31 +2,37 @@
 pipelines/gold/build_facts.py
 
 Builds fact_enrollment, fact_graduation, fact_dropout, fact_shifter, and
-fact_retention from Silver data + the Gold dimensions built in Day 12.
+fact_retention from Silver data + the Gold dimensions built in
+build_dimensions.py.
 
-The one piece of real design care in this file: resolving student_key for
-every fact row via an AS-OF join against dim_student's SCD2 history, not
-just "the student's current row." A shifted student has two dim_student
-rows; an enrollment record from BEFORE their shift must resolve to the
-OLD (closed) row, not the current one -- otherwise a student's pre-shift
-enrollment history would incorrectly show their post-shift program. This
-is exactly the point of building SCD2 in the first place (Day 12); this
-is where it actually gets used, not just stored.
+-- Redesign note (Task 23/24 -- Gold Modeling Fix) --------------------------
+Every fact table below now carries a single `academic_period_key` instead
+of the old pair `semester_key` + `academic_year_key`. That pair only
+existed because dimensions were snowflaked (dim_semester -> dim_academic_year);
+now that dim_academic_period is one denormalized row per semester (see
+build_dimensions.py's docstring), carrying both keys on every fact would
+just be redundant -- academic_year is already reachable via a single join
+to dim_academic_period.
 
-On "MERGE/upsert" vs. full rebuild: docs/12_Implementation_Roadmap.md
-describes fact loads as MERGE/upsert keyed on natural key + semester, which
-assumes an incrementally-maintained warehouse table. This project's Gold
-facts are instead FULLY REBUILT from Silver on every run -- a full rebuild
-at this data volume (tens of thousands of rows) is simpler than an
-incremental merge and carries none of an incremental merge's failure
-modes (partial updates, forgotten backfills, drift between merge logic
-and full-rebuild logic). Idempotency is achieved differently but no less
-genuinely: the same Silver input always produces the exact same Gold
-output, so re-running never duplicates anything -- proven by a test that
-runs the build twice and asserts identical row counts and content, not
-just "the row count is stable" superficially. This mirrors the same
-full-recompute reasoning docs/06_Data_Warehouse.md already applies to
-fact_institution_kpi, now extended to the base facts too.
+`fact_enrollment` now carries `year_level_key` (FK to dim_year_level)
+instead of a raw `year_level` int -- see build_dimensions.py's docstring
+for why year_level is now a governed dimension. Anything that needs the
+*numeric* year_level back (graduation-eligibility, momentum -- both in
+build_kpi.py) joins dim_year_level for it; the value isn't lost, just
+normalized to one place.
+
+The centerpiece of this file, unchanged from the original design: resolving
+student_key for every fact row via an AS-OF join against dim_student's
+SCD2 history, not just "the student's current row." A shifted student has
+two dim_student rows; an enrollment record from BEFORE their shift must
+resolve to the OLD (closed) row, not the current one -- otherwise a
+student's pre-shift enrollment history would incorrectly show their
+post-shift program.
+
+On "MERGE/upsert" vs. full rebuild: Gold facts are FULLY REBUILT from
+Silver on every run -- simpler than incremental merge at this data
+volume, and it avoids an entire class of incremental-merge bugs. The
+same Silver input always produces the exact same Gold output.
 """
 
 from __future__ import annotations
@@ -61,129 +67,150 @@ def _write_parquet(storage: ObjectStorage, key: str, df: pd.DataFrame) -> None:
 
 
 def _load_gold_dimensions(gold_storage: ObjectStorage) -> Dict[str, pd.DataFrame]:
-    names = ["dim_student", "dim_program", "dim_college", "dim_semester", "dim_academic_year"]
+    names = ["dim_student", "dim_program", "dim_college", "dim_academic_period", "dim_year_level"]
     return {name: _read_parquet(gold_storage, f"gold/{name}/data.parquet") for name in names}
 
 
 def resolve_student_key_as_of(
-    df: pd.DataFrame, dim_student: pd.DataFrame, dim_semester: pd.DataFrame, conn: duckdb.DuckDBPyConnection
+    df: pd.DataFrame,
+    dim_student: pd.DataFrame,
+    dim_academic_period: pd.DataFrame,
+    conn: duckdb.DuckDBPyConnection,
 ) -> pd.DataFrame:
     """AS-OF join: attach the student_key valid AT the row's own
     (academic_year, semester_number) -- not just the student's current
-    row. Uses dim_student's [_valid_from_semester_key, _valid_to_semester_key]
-    range (open-ended if _valid_to_semester_key is null / current).
+    row. Uses dim_student's [_valid_from_period_key, _valid_to_period_key]
+    range (open-ended if _valid_to_period_key is null / current).
     """
     conn.register("df_view", df)
     conn.register("dim_student_view", dim_student)
-    conn.register("dim_semester_view", dim_semester)
+    conn.register("dim_period_view", dim_academic_period)
 
     result = conn.execute(
         """
         SELECT df.*, ds.student_key
         FROM df_view df
-        JOIN dim_semester_view sem
-            ON df.academic_year = sem.academic_year AND df.semester_number = sem.semester_number
+        JOIN dim_period_view per
+            ON df.academic_year = per.academic_year AND df.semester_number = per.semester_number
         JOIN dim_student_view ds
             ON df.student_id = ds.student_id
-            AND sem.semester_key >= ds._valid_from_semester_key
-            AND (ds._valid_to_semester_key IS NULL OR sem.semester_key <= ds._valid_to_semester_key)
+            AND per.academic_period_key >= ds._valid_from_period_key
+            AND (ds._valid_to_period_key IS NULL OR per.academic_period_key <= ds._valid_to_period_key)
         """
     ).df()
 
     conn.unregister("df_view")
     conn.unregister("dim_student_view")
-    conn.unregister("dim_semester_view")
+    conn.unregister("dim_period_view")
     return result
 
 
-def _attach_semester_key(df: pd.DataFrame, dim_semester: pd.DataFrame) -> pd.DataFrame:
-    lookup = dim_semester.set_index(["academic_year", "semester_number"])[["semester_key", "academic_year_key"]]
-    keys = df.set_index(["academic_year", "semester_number"]).index.map(lambda k: lookup.loc[k])
+def _attach_period_key(df: pd.DataFrame, dim_academic_period: pd.DataFrame) -> pd.DataFrame:
+    lookup = dim_academic_period.set_index(["academic_year", "semester_number"])["academic_period_key"]
     df = df.copy()
-    df["semester_key"] = [k["semester_key"] for k in keys]
-    df["academic_year_key"] = [k["academic_year_key"] for k in keys]
+    df["academic_period_key"] = df.set_index(["academic_year", "semester_number"]).index.map(lookup)
     return df
 
 
 def build_fact_enrollment(
     enrollment_df: pd.DataFrame, dims: Dict[str, pd.DataFrame], conn: duckdb.DuckDBPyConnection
 ) -> pd.DataFrame:
-    df = resolve_student_key_as_of(enrollment_df, dims["dim_student"], dims["dim_semester"], conn)
-    df = _attach_semester_key(df, dims["dim_semester"])
+    df = resolve_student_key_as_of(enrollment_df, dims["dim_student"], dims["dim_academic_period"], conn)
+    df = _attach_period_key(df, dims["dim_academic_period"])
 
     program_key_by_id = dict(zip(dims["dim_program"]["program_id"], dims["dim_program"]["program_key"]))
     college_key_by_id = dict(zip(dims["dim_college"]["college_id"], dims["dim_college"]["college_key"]))
+    year_level_key_by_level = dict(zip(dims["dim_year_level"]["year_level"], dims["dim_year_level"]["year_level_key"]))
+
     df["program_key"] = df["program_id"].map(program_key_by_id)
     df["college_key"] = df["college_id"].map(college_key_by_id)
+    df["year_level_key"] = df["year_level"].map(year_level_key_by_level)
 
-    return df[["student_key", "program_key", "college_key", "semester_key", "academic_year_key",
-               "enrollment_status", "year_level", "units_enrolled", "is_new_enrollee"]].reset_index(drop=True)
+    unmapped = df["year_level_key"].isna().sum()
+    if unmapped:
+        raise ValueError(
+            f"{unmapped} fact_enrollment row(s) have a year_level outside dim_year_level's "
+            "governed domain -- extend YEAR_LEVEL_LABELS in build_dimensions.py, don't silently drop them."
+        )
+
+    return df[["student_key", "program_key", "college_key", "academic_period_key",
+               "enrollment_status", "year_level_key", "units_enrolled", "is_new_enrollee"]].reset_index(drop=True)
 
 
 def build_fact_graduation(
     graduation_df: pd.DataFrame, dims: Dict[str, pd.DataFrame], conn: duckdb.DuckDBPyConnection
 ) -> pd.DataFrame:
-    df = resolve_student_key_as_of(graduation_df, dims["dim_student"], dims["dim_semester"], conn)
-    df = _attach_semester_key(df, dims["dim_semester"])
+    df = resolve_student_key_as_of(graduation_df, dims["dim_student"], dims["dim_academic_period"], conn)
+    df = _attach_period_key(df, dims["dim_academic_period"])
     program_key_by_id = dict(zip(dims["dim_program"]["program_id"], dims["dim_program"]["program_key"]))
     college_key_by_id = dict(zip(dims["dim_college"]["college_id"], dims["dim_college"]["college_key"]))
     df["program_key"] = df["program_id"].map(program_key_by_id)
     df["college_key"] = df["college_id"].map(college_key_by_id)
-    return df[["student_key", "program_key", "college_key", "semester_key", "academic_year_key",
+    return df[["student_key", "program_key", "college_key", "academic_period_key",
                "years_to_complete"]].reset_index(drop=True)
 
 
 def build_fact_dropout(
     dropout_df: pd.DataFrame, dims: Dict[str, pd.DataFrame], conn: duckdb.DuckDBPyConnection
 ) -> pd.DataFrame:
-    df = resolve_student_key_as_of(dropout_df, dims["dim_student"], dims["dim_semester"], conn)
-    df = _attach_semester_key(df, dims["dim_semester"])
+    df = resolve_student_key_as_of(dropout_df, dims["dim_student"], dims["dim_academic_period"], conn)
+    df = _attach_period_key(df, dims["dim_academic_period"])
     program_key_by_id = dict(zip(dims["dim_program"]["program_id"], dims["dim_program"]["program_key"]))
     college_key_by_id = dict(zip(dims["dim_college"]["college_id"], dims["dim_college"]["college_key"]))
     df["program_key"] = df["program_id"].map(program_key_by_id)
     df["college_key"] = df["college_id"].map(college_key_by_id)
-    return df[["student_key", "program_key", "college_key", "semester_key", "academic_year_key",
+    return df[["student_key", "program_key", "college_key", "academic_period_key",
                "dropout_reason", "semesters_completed_before_dropout"]].reset_index(drop=True)
 
 
 def build_fact_shifter(
     shifter_df: pd.DataFrame, dims: Dict[str, pd.DataFrame], conn: duckdb.DuckDBPyConnection
 ) -> pd.DataFrame:
-    df = resolve_student_key_as_of(shifter_df, dims["dim_student"], dims["dim_semester"], conn)
-    df = _attach_semester_key(df, dims["dim_semester"])
+    df = resolve_student_key_as_of(shifter_df, dims["dim_student"], dims["dim_academic_period"], conn)
+    df = _attach_period_key(df, dims["dim_academic_period"])
     program_key_by_id = dict(zip(dims["dim_program"]["program_id"], dims["dim_program"]["program_key"]))
     df["from_program_key"] = df["from_program_id"].map(program_key_by_id)
     df["to_program_key"] = df["to_program_id"].map(program_key_by_id)
     return df[["student_key", "from_program_key", "to_program_key",
-               "semester_key", "academic_year_key"]].reset_index(drop=True)
+               "academic_period_key"]].reset_index(drop=True)
 
 
-def build_fact_retention(fact_enrollment: pd.DataFrame, dim_semester: pd.DataFrame) -> pd.DataFrame:
+def build_fact_retention(fact_enrollment: pd.DataFrame, dim_academic_period: pd.DataFrame) -> pd.DataFrame:
     """One row per student per semester where a 'did they continue' question
-    is even answerable: excludes GRADUATED rows (nothing to retain past
-    graduation) and the final observed semester (2024-2 -- no next semester
-    exists to check, so retention there is undefined, not 'not retained').
-    is_retained = 1 if the student has an ENROLLED or GRADUATED record in
-    the immediately following semester, else 0 (they dropped or simply
-    have no further record).
-    """
-    max_semester_key = dim_semester["semester_key"].max()
+    is even answerable: excludes GRADUATED rows and the final observed
+    semester (no next semester to check).
 
-    next_status = fact_enrollment.set_index(["student_key", "semester_key"])["enrollment_status"]
+    "Immediately following semester" is resolved via `period_ordinal + 1`,
+    NOT `academic_period_key + 1` -- the two happen to coincide today
+    because dim_academic_period's keys are assigned in chronological
+    order, but the ordinal is the column that actually *means*
+    "next chronological period"; the key is just an opaque surrogate.
+    Depending on key arithmetic to encode chronology is a latent bug
+    waiting for the day someone re-keys or re-sorts the dimension.
+    """
+    ordinal_by_period_key = dict(
+        zip(dim_academic_period["academic_period_key"], dim_academic_period["period_ordinal"])
+    )
+    max_ordinal = dim_academic_period["period_ordinal"].max()
+
+    fact_enrollment = fact_enrollment.copy()
+    fact_enrollment["_period_ordinal"] = fact_enrollment["academic_period_key"].map(ordinal_by_period_key)
+
+    next_status = fact_enrollment.set_index(["student_key", "_period_ordinal"])["enrollment_status"]
 
     eligible = fact_enrollment[
         (fact_enrollment["enrollment_status"] != "GRADUATED")
-        & (fact_enrollment["semester_key"] < max_semester_key)
+        & (fact_enrollment["_period_ordinal"] < max_ordinal)
     ].copy()
 
     def _is_retained(row) -> int:
-        next_key = (row["student_key"], row["semester_key"] + 1)
+        next_key = (row["student_key"], row["_period_ordinal"] + 1)
         status = next_status.get(next_key)
         return int(status in ("ENROLLED", "GRADUATED"))
 
     eligible["is_retained"] = eligible.apply(_is_retained, axis=1)
-    return eligible[["student_key", "program_key", "college_key", "semester_key",
-                      "academic_year_key", "is_retained"]].reset_index(drop=True)
+    return eligible[["student_key", "program_key", "college_key",
+                      "academic_period_key", "is_retained"]].reset_index(drop=True)
 
 
 def _write_and_log(gold_storage, meta_conn, name: str, df: pd.DataFrame, rows_in: int) -> None:
@@ -225,7 +252,7 @@ def build_all_facts(
     fact_shifter = build_fact_shifter(shifter_df, dims, conn)
     _write_and_log(gold_storage, meta_conn, "fact_shifter", fact_shifter, len(shifter_df))
 
-    fact_retention = build_fact_retention(fact_enrollment, dims["dim_semester"])
+    fact_retention = build_fact_retention(fact_enrollment, dims["dim_academic_period"])
     _write_and_log(gold_storage, meta_conn, "fact_retention", fact_retention, len(fact_enrollment))
 
     conn.close()
