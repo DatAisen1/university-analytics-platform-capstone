@@ -15,10 +15,11 @@ baseline structurally hard to beat.
 
 import os
 
+import pandas as pd
 import pytest
 
-
-from models.forecasting.train_prophet import TEST_PERIOD_ORDINALS, semester_to_date
+from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
+from models.forecasting.train_prophet import TEST_PERIOD_ORDINALS, evaluate_all_series, fit_prophet, semester_to_date
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
     "POSTGRES_PORT": os.environ.get("TEST_POSTGRES_PORT", "5432"),
@@ -44,6 +45,46 @@ def test_semester_to_date_matches_dim_calendar_convention():
 
 def test_exactly_four_walk_forward_test_points():
     assert TEST_PERIOD_ORDINALS == [5, 6, 7, 8]
+
+
+def test_fit_prophet_wraps_training_failures_in_model_training_error(monkeypatch):
+    class BrokenProphet:
+        def fit(self, train_df):
+            raise RuntimeError("boom")
+
+    monkeypatch.setitem(__import__("sys").modules, "prophet", type("ProphetModule", (), {"Prophet": BrokenProphet}))
+
+    with pytest.raises(ModelTrainingError) as exc:
+        fit_prophet(pd.DataFrame({"ds": ["2021-01-01"], "y_col": [1.0]}))
+
+    assert exc.value.category.value == "MODEL_TRAINING_ERROR"
+    assert "Prophet training failed" in str(exc.value)
+
+
+def test_evaluate_all_series_wraps_evaluation_failures_in_model_evaluation_error(monkeypatch):
+    monkeypatch.setattr(
+        "models.forecasting.train_prophet.load_series",
+        lambda engine: pd.DataFrame({
+            "college_id": ["CICT"],
+            "college_key": [1],
+            "period_ordinal": [1],
+            "academic_year": [2021],
+            "semester_number": [1],
+            "enrollment_count": [1],
+            "graduation_count": [1],
+            "ds": ["2021-01-01"],
+        }),
+    )
+    monkeypatch.setattr(
+        "models.forecasting.train_prophet.walk_forward_evaluate",
+        lambda college_series, metric: (_ for _ in ()).throw(RuntimeError("bad fold")),
+    )
+
+    with pytest.raises(ModelEvaluationError) as exc:
+        evaluate_all_series(engine=None)
+
+    assert exc.value.category.value == "MODEL_EVALUATION_ERROR"
+    assert "Walk-forward evaluation failed" in str(exc.value)
 
 
 def _postgres_available() -> bool:

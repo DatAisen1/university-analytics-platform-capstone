@@ -63,6 +63,7 @@ from models.forecasting.train_prophet import (
     load_series,
     walk_forward_evaluate,
 )
+from pipelines.common.errors import ForecastError
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +167,11 @@ def _write_forecast_row(
                 ),
             )
         conn.commit()
-    except Exception:
+    except Exception as exc:
         conn.rollback()
-        raise
+        raise ForecastError(
+            f"Failed to write forecast row: {exc}", stage="Forecast Deployment",
+        ) from exc
     finally:
         conn.close()
 
@@ -183,121 +186,126 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
     a series with no genuinely new academic period since its last
     training run does no work at all, not just "no promotion".
     """
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    series_df = load_series(engine)
-    results: List[DeploymentResult] = []
+    try:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        series_df = load_series(engine)
+        results: List[DeploymentResult] = []
 
-    for college_id in sorted(series_df["college_id"].unique()):
-        college_series = series_df[series_df["college_id"] == college_id].sort_values("period_ordinal")
-        college_key = int(college_series["college_key"].iloc[0])
-        current_max_period_ordinal = int(college_series["period_ordinal"].max())
-        current_min_period_ordinal = int(college_series["period_ordinal"].min())
+        for college_id in sorted(series_df["college_id"].unique()):
+            college_series = series_df[series_df["college_id"] == college_id].sort_values("period_ordinal")
+            college_key = int(college_series["college_key"].iloc[0])
+            current_max_period_ordinal = int(college_series["period_ordinal"].max())
+            current_min_period_ordinal = int(college_series["period_ordinal"].min())
 
-        for metric in TARGET_METRICS:
-            last_trained_period_ordinal = get_last_trained_period_ordinal(engine, college_key, metric)
-            retrain_decision: RetrainDecision = should_retrain(current_max_period_ordinal, last_trained_period_ordinal)
+            for metric in TARGET_METRICS:
+                last_trained_period_ordinal = get_last_trained_period_ordinal(engine, college_key, metric)
+                retrain_decision: RetrainDecision = should_retrain(current_max_period_ordinal, last_trained_period_ordinal)
 
-            if not retrain_decision.should_retrain:
-                logger.info("Skipping %s/%s (no retrain): %s", college_id, metric, retrain_decision.reason)
-                results.append(
-                    DeploymentResult(
-                        college_id=college_id, college_key=college_key, metric=metric,
-                        retrained=False, promoted=False, reason=retrain_decision.reason,
+                if not retrain_decision.should_retrain:
+                    logger.info("Skipping %s/%s (no retrain): %s", college_id, metric, retrain_decision.reason)
+                    results.append(
+                        DeploymentResult(
+                            college_id=college_id, college_key=college_key, metric=metric,
+                            retrained=False, promoted=False, reason=retrain_decision.reason,
+                        )
                     )
+                    continue
+
+                # Per-series walk-forward evaluation (Day 20 harness, unchanged).
+                fold_results = walk_forward_evaluate(college_series, metric)
+                model_metrics = {
+                    name: compute_metrics_for_model(r["actual"], r["predicted"]) for name, r in fold_results.items()
+                }
+                best_baseline_mae = min(model_metrics["naive"]["mae"], model_metrics["historical_avg"]["mae"])
+                beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
+
+                prophet_mape = model_metrics["prophet"]["mape"]
+                candidate = CandidateMetrics(
+                    mae=model_metrics["prophet"]["mae"],
+                    rmse=model_metrics["prophet"]["rmse"],
+                    mape=None if pd.isna(prophet_mape) else float(prophet_mape),
+                    r2=model_metrics["prophet"]["r2"],
+                    best_baseline_mae=best_baseline_mae,
+                    beats_baseline=beats_baseline,
                 )
-                continue
 
-            # Per-series walk-forward evaluation (Day 20 harness, unchanged).
-            fold_results = walk_forward_evaluate(college_series, metric)
-            model_metrics = {
-                name: compute_metrics_for_model(r["actual"], r["predicted"]) for name, r in fold_results.items()
-            }
-            best_baseline_mae = min(model_metrics["naive"]["mae"], model_metrics["historical_avg"]["mae"])
-            beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
+                champion = get_current_champion(engine, college_key, metric)
+                decision: PromotionDecision = decide_promotion(candidate, champion)
+                model_version = make_model_version(college_id, metric)
 
-            prophet_mape = model_metrics["prophet"]["mape"]
-            candidate = CandidateMetrics(
-                mae=model_metrics["prophet"]["mae"],
-                rmse=model_metrics["prophet"]["rmse"],
-                mape=None if pd.isna(prophet_mape) else float(prophet_mape),
-                r2=model_metrics["prophet"]["r2"],
-                best_baseline_mae=best_baseline_mae,
-                beats_baseline=beats_baseline,
-            )
+                # Refit on the FULL history regardless of the decision -- an
+                # evaluation-only candidate still needs an artifact on disk
+                # so its walk-forward result is reproducible/inspectable
+                # later, even if it's never deployed.
+                train_df = college_series.rename(columns={metric: "y_col"})
+                model = fit_prophet(train_df)
+                artifact_path = artifacts_dir / f"{model_version}.pkl"
+                with artifact_path.open("wb") as f:
+                    pickle.dump(model, f)
 
-            champion = get_current_champion(engine, college_key, metric)
-            decision: PromotionDecision = decide_promotion(candidate, champion)
-            model_version = make_model_version(college_id, metric)
+                training_meta = TrainingMetadata(
+                    algorithm=_ALGORITHM,
+                    training_data_start_period_ordinal=current_min_period_ordinal,
+                    training_data_end_period_ordinal=current_max_period_ordinal,
+                    training_record_count=len(train_df),
+                )
 
-            # Refit on the FULL history regardless of the decision -- an
-            # evaluation-only candidate still needs an artifact on disk
-            # so its walk-forward result is reproducible/inspectable
-            # later, even if it's never deployed.
-            train_df = college_series.rename(columns={metric: "y_col"})
-            model = fit_prophet(train_df)
-            artifact_path = artifacts_dir / f"{model_version}.pkl"
-            with artifact_path.open("wb") as f:
-                pickle.dump(model, f)
+                model_registry_key = record_candidate(
+                    engine, college_key, metric, model_version, candidate, training_meta, str(artifact_path), decision
+                )
 
-            training_meta = TrainingMetadata(
-                algorithm=_ALGORITHM,
-                training_data_start_period_ordinal=current_min_period_ordinal,
-                training_data_end_period_ordinal=current_max_period_ordinal,
-                training_record_count=len(train_df),
-            )
+                result_kwargs = dict(
+                    college_id=college_id,
+                    college_key=college_key,
+                    metric=metric,
+                    retrained=True,
+                    model_version=model_version,
+                    promoted=decision.promote,
+                    reason=decision.reason,
+                    candidate_mae=candidate.mae,
+                )
 
-            model_registry_key = record_candidate(
-                engine, college_key, metric, model_version, candidate, training_meta, str(artifact_path), decision
-            )
+                if not decision.promote:
+                    logger.warning("Candidate %s NOT promoted: %s", model_version, decision.reason)
+                    results.append(DeploymentResult(**result_kwargs))
+                    continue
 
-            result_kwargs = dict(
-                college_id=college_id,
-                college_key=college_key,
-                metric=metric,
-                retrained=True,
-                model_version=model_version,
-                promoted=decision.promote,
-                reason=decision.reason,
-                candidate_mae=candidate.mae,
-            )
+                target_year, target_semester, target_ordinal = _next_target_period(current_max_period_ordinal)
+                target_ds = _semester_to_date(target_year, target_semester)
+                yhat, yhat_lower, yhat_upper = _forecast_next_period(model, target_ds)
 
-            if not decision.promote:
-                logger.warning("Candidate %s NOT promoted: %s", model_version, decision.reason)
-                results.append(DeploymentResult(**result_kwargs))
-                continue
-
-            target_year, target_semester, target_ordinal = _next_target_period(current_max_period_ordinal)
-            target_ds = _semester_to_date(target_year, target_semester)
-            yhat, yhat_lower, yhat_upper = _forecast_next_period(model, target_ds)
-
-            _write_forecast_row(
-                engine,
-                college_key=college_key,
-                metric=metric,
-                target_academic_year=target_year,
-                target_semester_number=target_semester,
-                target_period_ordinal=target_ordinal,
-                model_registry_key=model_registry_key,
-                model_version=model_version,
-                yhat=yhat,
-                yhat_lower=yhat_lower,
-                yhat_upper=yhat_upper,
-            )
-            logger.info(
-                "Promoted %s (MAE %.4f): forecast %.2f for %s-%s",
-                model_version, candidate.mae, yhat, target_year, target_semester,
-            )
-
-            results.append(
-                DeploymentResult(
+                _write_forecast_row(
+                    engine,
+                    college_key=college_key,
+                    metric=metric,
                     target_academic_year=target_year,
                     target_semester_number=target_semester,
+                    target_period_ordinal=target_ordinal,
+                    model_registry_key=model_registry_key,
+                    model_version=model_version,
                     yhat=yhat,
-                    **result_kwargs,
+                    yhat_lower=yhat_lower,
+                    yhat_upper=yhat_upper,
                 )
-            )
+                logger.info(
+                    "Promoted %s (MAE %.4f): forecast %.2f for %s-%s",
+                    model_version, candidate.mae, yhat, target_year, target_semester,
+                )
 
-    return results
+                results.append(
+                    DeploymentResult(
+                        target_academic_year=target_year,
+                        target_semester_number=target_semester,
+                        yhat=yhat,
+                        **result_kwargs,
+                    )
+                )
+
+        return results
+    except ForecastError:
+        raise
+    except Exception as exc:
+        raise ForecastError(f"Forecast deployment failed: {exc}", stage="Forecast Deployment") from exc
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dagster import AssetExecutionContext, MetadataValue, asset
-
+from pipelines.common.errors import PipelineError, classify_exception
 from models.forecasting.deploy_forecast import deploy_forecasts
 from models.forecasting.train_prophet import evaluate_all_series, train_final_models, write_evaluation_report
 from pipelines.common.metadata import get_connection, record_pipeline_run
@@ -59,6 +59,11 @@ def _track_asset_run(context: AssetExecutionContext, stage: str, handler):
         return result
     except Exception as exc:  # pragma: no cover - error path exercised via Dagster runtime
         completed_at = datetime.now(timezone.utc)
+        # Task 46/47: classify_exception is a no-op passthrough if the
+        # handler already raised a PipelineError subclass (the common
+        # case once modules below are updated); it only synthesizes a
+        # category for a third-party exception that slipped through.
+        pipeline_error = classify_exception(exc, stage=stage)
         record_pipeline_run(
             conn,
             run_id=context.run_id,
@@ -67,9 +72,15 @@ def _track_asset_run(context: AssetExecutionContext, stage: str, handler):
             started_at=started_at,
             completed_at=completed_at,
             records_processed=0,
-            error=str(exc),
+            error=pipeline_error.message,
+            error_category=pipeline_error.category.value,
+            rows_affected=pipeline_error.rows_affected,
         )
-        raise
+        # Task 47: the traceable, structured report -- Stage / Error /
+        # Rows affected -- goes to Dagster's own run log, not just a
+        # bare "Pipeline failed".
+        context.log.error(pipeline_error.to_report())
+        raise pipeline_error from exc
 
 
 @asset(group_name="ingestion")

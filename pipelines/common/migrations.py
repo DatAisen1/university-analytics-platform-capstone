@@ -35,7 +35,7 @@ import logging
 import re
 from pathlib import Path
 from typing import List, NamedTuple, Optional
-
+from pipelines.common.errors import PostgresError
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,9 +44,13 @@ DDL_DIR = _REPO_ROOT / "warehouse" / "ddl"
 _MIGRATION_FILENAME_RE = re.compile(r"^(\d{3,})_.+\.sql$")
 
 
-class MigrationError(Exception):
-    """Base class for migration-runner failures."""
+class MigrationError(PostgresError):
+    """Base class for migration-runner failures. Subclass of
+    PostgresError (Task 46) since a migration failure is fundamentally a
+    Postgres-schema-state problem."""
 
+    def __init__(self, message: str, *, stage: str = "Postgres Migrations", **kwargs):
+        super().__init__(message, stage=stage, **kwargs)
 
 class MigrationChecksumError(MigrationError):
     """Raised when an already-applied migration's file contents have

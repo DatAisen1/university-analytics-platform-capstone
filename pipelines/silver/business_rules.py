@@ -58,6 +58,20 @@ from pipelines.common.academic_periods import OBSERVED_START_YEAR, SEMESTER_LABE
 from pipelines.common.metadata import get_connection, record_run
 from pipelines.common.storage import LocalFileStorage, ObjectStorage
 
+# ADD near the top, after existing imports/constants
+from pipelines.common.errors import (
+    DataQualityFailureError,
+    InvalidAcademicYearError,
+    InvalidSchemaError,
+    InvalidYearLevelError,
+)
+
+# Task 47: a quarantine rate above this on a single business-rule check
+# means "the data is structurally broken", not "a normal sprinkling of
+# bad rows" -- escalate to a hard, traceable failure instead of quietly
+# reporting SUCCESS with almost everything discarded.
+MAX_QUARANTINE_RATE = 0.25
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
 
@@ -243,10 +257,11 @@ def check_admissions_funnel(
     """
     missing = [c for c in (applicants_col, accepted_col, enrolled_col) if c not in df.columns]
     if missing:
-        raise KeyError(
+        raise InvalidSchemaError(
             f"check_admissions_funnel requires columns {[applicants_col, accepted_col, enrolled_col]}; "
             f"missing {missing}. See this function's docstring: today's 7 Silver entities do not "
-            f"model an admissions funnel."
+            f"model an admissions funnel.",
+            stage="Silver Business Validation", rows_affected=len(df), details={"missing_columns": missing},
         )
     mask = (df[accepted_col] <= df[applicants_col]) & (df[enrolled_col] <= df[accepted_col])
     valid = df[mask].copy()
@@ -324,12 +339,22 @@ def run_business_validation(
         except FileNotFoundError:
             continue
 
+        # AFTER
+        rows_in = len(df)
         working, bad_college = check_program_college_consistency(df, program_df, entity)
         working, bad_semester = check_semester_valid(working)
+        _enforce_quality_gate(entity, "check_semester_valid", bad_semester, rows_in,
+                               InvalidSchemaError, "Silver Business Validation")  # not a listed category on its own; folded under schema
+
         working, bad_year = check_academic_year_valid(working)
+        _enforce_quality_gate(entity, "check_academic_year_valid", bad_year, rows_in,
+                               InvalidAcademicYearError, "Silver Business Validation")
+
         working, bad_counts = check_counts_non_negative(working, COUNT_COLUMNS.get(entity, []))
         if entity == "enrollment":
             working, bad_year_level = check_year_level_valid(working, program_df)
+            _enforce_quality_gate(entity, "check_year_level_valid", bad_year_level, rows_in,
+                                   InvalidYearLevelError, "Silver Business Validation")
         else:
             bad_year_level = working.iloc[0:0].copy()
 
@@ -351,6 +376,25 @@ def run_business_validation(
     if owns_conn:
         meta_conn.close()
     return results
+
+# ADD new helper, near _record_and_write
+
+def _enforce_quality_gate(
+    entity: str, check_name: str, bad_df: pd.DataFrame, rows_in: int, error_cls, stage: str,
+) -> None:
+    """Task 47: escalate a single check's quarantine rate to a
+    categorized, traceable hard failure when it crosses
+    MAX_QUARANTINE_RATE, instead of reporting SUCCESS regardless of how
+    much data that one check discarded."""
+    if rows_in == 0 or bad_df.empty:
+        return
+    rate = len(bad_df) / rows_in
+    if rate > MAX_QUARANTINE_RATE:
+        raise error_cls(
+            f"{check_name} quarantined {len(bad_df)}/{rows_in} rows ({rate:.1%}) for entity {entity!r} "
+            f"-- exceeds the {MAX_QUARANTINE_RATE:.0%} tolerance for this check.",
+            stage=stage, entity=entity, rows_affected=len(bad_df),
+        )
 
 
 if __name__ == "__main__":

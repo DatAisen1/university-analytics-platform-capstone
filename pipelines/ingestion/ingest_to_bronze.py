@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
-
+from pipelines.common.errors import InvalidSchemaError
 from pipelines.common.config import ReferenceData, load_default_reference_data
 from pipelines.common.metadata import get_connection, has_successful_run, record_run, record_success_once
 from pipelines.common.schemas import validate_bronze_dataframe
@@ -94,12 +94,14 @@ REQUIRED_COLUMNS = {
 # merely planned.
 
 
-class IngestionError(Exception):
+class IngestionError(InvalidSchemaError):
     """Raised for file-level ingestion problems: missing source, empty
-    file, or missing expected columns. Distinct from ConfigError (which
-    covers config authoring problems) -- this is about the DATA a batch
-    was supposed to contain, not the pipeline's own configuration."""
+    file, or missing expected columns -- now InvalidSchemaError (Task
+    46), since this is exactly a "the file's shape doesn't match what
+    Bronze requires" failure."""
 
+    def __init__(self, message: str, *, stage: str = "Bronze Ingestion", **kwargs):
+        super().__init__(message, stage=stage, **kwargs)
 
 def _inspect_schema(df: pd.DataFrame, entity: str, source_path: str) -> Dict[str, object]:
     """Stage 2: a non-raising snapshot of what a source file actually
@@ -136,13 +138,15 @@ def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# AFTER
 def _validate_file_level(df: pd.DataFrame, entity: str, source_path: str) -> None:
     if df.empty:
-        raise IngestionError(f"Source is empty: {source_path}")
+        raise IngestionError(f"Source is empty: {source_path}", entity=entity, rows_affected=0)
     missing_cols = set(REQUIRED_COLUMNS[entity]) - set(df.columns)
     if missing_cols:
         raise IngestionError(
-            f"{source_path} is missing expected column(s) for entity {entity!r}: {sorted(missing_cols)}"
+            f"{source_path} is missing expected column(s) for entity {entity!r}: {sorted(missing_cols)}",
+            entity=entity, rows_affected=len(df),
         )
 
 
@@ -200,9 +204,11 @@ def _run_schema_validation(
                 for _, row in exc.failure_cases.head(5).iterrows()
             )
         )
+        # AFTER
         record_run(
             meta_conn, run_id, batch_id, SCHEMA_VALIDATION_STAGE, entity, partition_key,
             started_at, status="FAILED", rows_in=len(df), source_path=source_path, error_message=summary,
+            error_category="INVALID_SCHEMA", rows_affected=failure_count,
         )
         return {"entity": entity, "partition_key": partition_key, "status": "SCHEMA_INVALID",
                 "violation_count": failure_count, "summary": summary}

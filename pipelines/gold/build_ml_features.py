@@ -50,7 +50,7 @@ from typing import List, Optional
 import pandas as pd
 
 from pipelines.common.postgres import replace_table_contents
-
+from pipelines.common.errors import FeatureEngineeringError
 PROGRAM_GRAIN_METRICS = ["enrollment_count", "graduation_count"]
 YEAR_LEVEL_GRAIN_METRICS = ["enrollment_count"]
 
@@ -218,14 +218,22 @@ def build_enrollment_features_by_year_level(engine) -> pd.DataFrame:
 
 
 def build_and_store_ml_features(engine) -> dict:
-    """Builds both feature tables and writes them to Postgres
-    (TRUNCATE-safe). Requires warehouse/ddl/007_ml_forecast_features.sql
-    to have been applied -- replace_table_contents() will raise
-    MissingTableError otherwise (Task 25's guardrail), rather than
-    silently creating an unconstrained table.
-    """
-    program_df = build_program_forecast_features(engine)
-    year_level_df = build_enrollment_features_by_year_level(engine)
+    try:
+        program_df = build_program_forecast_features(engine)
+        year_level_df = build_enrollment_features_by_year_level(engine)
+    except Exception as exc:  # SQL/window-function failures against the warehouse
+        raise FeatureEngineeringError(
+            f"Failed to build ML forecast feature tables: {exc}",
+            stage="Feature Engineering",
+        ) from exc
+
+    if program_df.empty or year_level_df.empty:
+        raise FeatureEngineeringError(
+            "ML feature build produced an empty feature table -- check that gold.fact_enrollment / "
+            "gold.fact_graduation have data for the requested period.",
+            stage="Feature Engineering", rows_affected=0,
+            details={"program_rows": len(program_df), "year_level_rows": len(year_level_df)},
+        )
 
     replace_table_contents(engine, "gold", "ml_program_forecast_features", program_df)
     replace_table_contents(engine, "gold", "ml_enrollment_features_by_year_level", year_level_df)

@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
-
+from pipelines.common.errors import PostgresError
 import psycopg2
 
 from pipelines.common.config import ConfigError
@@ -41,10 +41,15 @@ def get_admin_connection(env: Optional[dict] = None):
     if missing:
         raise ConfigError(f"Missing required environment variable(s) for Postgres admin connection: {missing}")
 
-    return psycopg2.connect(
-        host=env["POSTGRES_HOST"], port=env["POSTGRES_PORT"], dbname=env["POSTGRES_DB"],
-        user=env["POSTGRES_USER"], password=env["POSTGRES_PASSWORD"],
-    )
+    try:
+        return psycopg2.connect(
+            host=env["POSTGRES_HOST"], port=env["POSTGRES_PORT"], dbname=env["POSTGRES_DB"],
+            user=env["POSTGRES_USER"], password=env["POSTGRES_PASSWORD"],
+        )
+    except psycopg2.OperationalError as exc:
+        raise PostgresError(
+            f"Failed to connect to Postgres as admin: {exc}", stage="Postgres Connection",
+        ) from exc
 
 
 def get_role_connection(role: str, password: str, env: Optional[dict] = None):
@@ -129,15 +134,11 @@ def bootstrap_warehouse(passwords: Dict[str, str], env: Optional[dict] = None) -
         conn.close()
 
 
-class MissingTableError(RuntimeError):
+class MissingTableError(PostgresError):
     """Raised when a Gold/Silver writer targets a table that doesn't
-    exist yet. This means migrations haven't been applied -- see
-    pipelines.common.migrations.apply_migrations(). Deliberately NOT
-    auto-created here: that's the exact bug this task fixes (pandas'
-    `to_sql(if_exists='replace')` used to silently create a
-    constraint-less table on first load, which is how PK/FK/UNIQUE/
-    NOT NULL constraints went missing on a clean database)."""
-
+    exist yet -- migrations haven't been applied. Now a PostgresError
+    subclass (Task 46): category=POSTGRES_ERROR, and callers can attach
+    rows_affected (the row count of the DataFrame that couldn't load)."""
 
 def replace_table_contents(engine, schema: str, table_name: str, df) -> None:
     """Write `df` into `schema.table_name`, replacing its entire contents.
@@ -160,12 +161,16 @@ def replace_table_contents(engine, schema: str, table_name: str, df) -> None:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names(schema=schema))
 
+    # AFTER
     if table_name not in existing_tables:
         raise MissingTableError(
             f"{schema}.{table_name} does not exist. Apply migrations "
             f"(pipelines.common.migrations.apply_migrations) before loading data -- "
             f"tables must be created by tracked DDL, with their full constraints, "
-            f"never implicitly by pandas.to_sql."
+            f"never implicitly by pandas.to_sql.",
+            stage="Postgres Load",
+            entity=f"{schema}.{table_name}",
+            rows_affected=len(df),
         )
 
     with engine.begin() as conn:

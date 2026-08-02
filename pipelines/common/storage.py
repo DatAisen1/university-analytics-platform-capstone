@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from pipelines.common.config import ConfigError
+from pipelines.common.config import ConfigError
+from pipelines.common.errors import MinioError
 
 
 @dataclass(frozen=True)
@@ -145,11 +147,25 @@ class S3Storage(ObjectStorage):
         )
 
     def write_bytes(self, key: str, data: bytes) -> None:
-        self._client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        from botocore.exceptions import BotoCoreError, ClientError
+        try:
+            self._client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        except (BotoCoreError, ClientError) as exc:
+            raise MinioError(
+                f"Failed to write object to MinIO/S3: {exc}",
+                stage="Object Storage Write", entity=key, details={"bucket": self.bucket},
+            ) from exc
 
     def read_bytes(self, key: str) -> bytes:
-        response = self._client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"].read()
+        from botocore.exceptions import BotoCoreError, ClientError
+        try:
+            response = self._client.get_object(Bucket=self.bucket, Key=key)
+            return response["Body"].read()
+        except (BotoCoreError, ClientError) as exc:
+            raise MinioError(
+                f"Failed to read object from MinIO/S3: {exc}",
+                stage="Object Storage Read", entity=key, details={"bucket": self.bucket},
+            ) from exc
 
     def exists(self, key: str) -> bool:
         from botocore.exceptions import ClientError

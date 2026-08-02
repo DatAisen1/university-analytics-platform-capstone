@@ -13,7 +13,7 @@ succeeded). Bronze/Silver/Gold idempotency checks must work even when
 Postgres isn't reachable (local dev, CI, first bootstrap), so this stays
 on DuckDB even though Postgres is fully online.
 """
-
+from pipelines.common.errors import PipelineError
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -38,9 +38,18 @@ CREATE TABLE IF NOT EXISTS pipeline_run_log (
     rows_in         INTEGER,
     rows_out        INTEGER,
     source_path     VARCHAR,
-    error_message   VARCHAR
+    error_message   VARCHAR,
+    error_category  VARCHAR,
+    rows_affected   INTEGER
 )
 """
+
+_ALTER_TABLE_SQL = [
+    "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS error_category VARCHAR",
+    "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS rows_affected INTEGER",
+    "ALTER TABLE dagster_pipeline_runs ADD COLUMN IF NOT EXISTS error_category VARCHAR",
+    "ALTER TABLE dagster_pipeline_runs ADD COLUMN IF NOT EXISTS rows_affected INTEGER",
+]
 
 _CREATE_DAGSTER_RUNS_SQL = """
 CREATE TABLE IF NOT EXISTS dagster_pipeline_runs (
@@ -55,11 +64,14 @@ CREATE TABLE IF NOT EXISTS dagster_pipeline_runs (
 """
 
 
+# AFTER
 def get_connection(db_path: Path = DEFAULT_META_DB_PATH) -> duckdb.DuckDBPyConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db_path))
     conn.execute(_CREATE_TABLE_SQL)
     conn.execute(_CREATE_DAGSTER_RUNS_SQL)
+    for stmt in _ALTER_TABLE_SQL:
+        conn.execute(stmt)
     return conn
 
 
@@ -78,6 +90,7 @@ def has_successful_run(
     return result[0] > 0
 
 
+# AFTER
 def record_run(
     conn: duckdb.DuckDBPyConnection,
     run_id: str,
@@ -92,14 +105,39 @@ def record_run(
     source_path: str = "",
     ended_at: Optional[datetime] = None,
     error_message: str = "",
+    error_category: str = "",
+    rows_affected: Optional[int] = None,
 ) -> None:
     conn.execute(
-        "INSERT INTO pipeline_run_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO pipeline_run_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             run_id, batch_id, stage, entity, partition_key,
             started_at, ended_at or datetime.now(timezone.utc), status,
             rows_in, rows_out, source_path, error_message,
+            error_category, rows_affected,
         ],
+    )
+
+
+def record_run_failure(
+    conn: duckdb.DuckDBPyConnection,
+    run_id: str,
+    batch_id: str,
+    entity: str,
+    partition_key: str,
+    started_at: datetime,
+    error: PipelineError,
+    rows_in: int = 0,
+    source_path: str = "",
+) -> None:
+    """Task 47: record a FAILED run using a PipelineError's own
+    stage/category/rows_affected, instead of every call site
+    re-deriving those fields by hand from str(exc)."""
+    record_run(
+        conn, run_id, batch_id, stage=error.stage, entity=entity, partition_key=partition_key,
+        started_at=started_at, status="FAILED", rows_in=rows_in, source_path=source_path,
+        error_message=error.message, error_category=error.category.value,
+        rows_affected=error.rows_affected,
     )
 
 
@@ -149,6 +187,7 @@ def record_success_once(
         raise
 
 
+# AFTER
 def record_pipeline_run(
     conn: duckdb.DuckDBPyConnection,
     run_id: str,
@@ -158,6 +197,8 @@ def record_pipeline_run(
     completed_at=None,
     records_processed: int = 0,
     error: str = "",
+    error_category: str = "",
+    rows_affected: Optional[int] = None,
 ) -> None:
     if isinstance(started_at, str):
         started_at = datetime.fromisoformat(started_at)
@@ -167,8 +208,11 @@ def record_pipeline_run(
         completed_at = datetime.fromisoformat(completed_at)
 
     conn.execute(
-        "INSERT INTO dagster_pipeline_runs VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [run_id, stage, status, started_at, completed_at, records_processed, error],
+        "INSERT INTO dagster_pipeline_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            run_id, stage, status, started_at, completed_at, records_processed,
+            error, error_category, rows_affected,
+        ],
     )
 
 

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
-
+from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
 from models.forecasting.baselines import historical_average_baseline, naive_baseline
 from models.forecasting.metrics import mae, mape, r_squared, rmse
 
@@ -88,15 +88,15 @@ def fit_prophet(train_df: pd.DataFrame):
     sub-semester seasonality to it is fitting noise by definition.
     """
     from prophet import Prophet
-
-    model = Prophet(
-        yearly_seasonality=2,
-        weekly_seasonality=False,
-        daily_seasonality=False,
-    )
-    fit_df = train_df.rename(columns={"y_col": "y"})[["ds", "y"]]
-    model.fit(fit_df)
-    return model
+    try:
+        model = Prophet()
+        model.fit(train_df)
+        return model
+    except Exception as exc:
+        raise ModelTrainingError(
+            f"Prophet training failed: {exc}", stage="Model Training",
+            rows_affected=len(train_df),
+        ) from exc
 
 
 def predict_point(model, ds: str) -> float:
@@ -163,33 +163,38 @@ def evaluate_all_series(engine) -> pd.DataFrame:
     df = load_series(engine)
     rows = []
 
-    for college_id in sorted(df["college_id"].unique()):
-        college_series = df[df["college_id"] == college_id]
-        for metric in TARGET_METRICS:
-            fold_results = walk_forward_evaluate(college_series, metric)
+    try:
+        for college_id in sorted(df["college_id"].unique()):
+            college_series = df[df["college_id"] == college_id]
+            for metric in TARGET_METRICS:
+                fold_results = walk_forward_evaluate(college_series, metric)
 
-            model_metrics = {
-                name: compute_metrics_for_model(r["actual"], r["predicted"])
-                for name, r in fold_results.items()
-            }
+                model_metrics = {
+                    name: compute_metrics_for_model(r["actual"], r["predicted"])
+                    for name, r in fold_results.items()
+                }
 
-            best_baseline_mae = min(model_metrics["naive"]["mae"], model_metrics["historical_avg"]["mae"])
-            beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
+                best_baseline_mae = min(model_metrics["naive"]["mae"], model_metrics["historical_avg"]["mae"])
+                beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
 
-            rows.append({
-                "college_id": college_id,
-                "metric": metric,
-                "prophet_mae": model_metrics["prophet"]["mae"],
-                "prophet_rmse": model_metrics["prophet"]["rmse"],
-                "prophet_mape": model_metrics["prophet"]["mape"],
-                "prophet_r2": model_metrics["prophet"]["r2"],
-                "naive_mae": model_metrics["naive"]["mae"],
-                "historical_avg_mae": model_metrics["historical_avg"]["mae"],
-                "best_baseline_mae": best_baseline_mae,
-                "prophet_beats_best_baseline": beats_baseline,
-            })
+                rows.append({
+                    "college_id": college_id,
+                    "metric": metric,
+                    "prophet_mae": model_metrics["prophet"]["mae"],
+                    "prophet_rmse": model_metrics["prophet"]["rmse"],
+                    "prophet_mape": model_metrics["prophet"]["mape"],
+                    "prophet_r2": model_metrics["prophet"]["r2"],
+                    "naive_mae": model_metrics["naive"]["mae"],
+                    "historical_avg_mae": model_metrics["historical_avg"]["mae"],
+                    "best_baseline_mae": best_baseline_mae,
+                    "prophet_beats_best_baseline": beats_baseline,
+                })
 
-    return pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+    except Exception as exc:
+        raise ModelEvaluationError(
+            f"Walk-forward evaluation failed: {exc}", stage="Model Evaluation",
+        ) from exc
 
 
 def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> List[str]:

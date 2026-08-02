@@ -17,6 +17,7 @@ dashboard actually consume.
 from __future__ import annotations
 
 from typing import Callable, FrozenSet
+from pipelines.common.errors import InvalidSemesterError
 
 KNOWN_STATUSES = {"ENROLLED", "GRADUATED", "DROPPED"}
 
@@ -112,7 +113,7 @@ def normalize_semester_number(raw) -> int:
     normalize_enrollment_status already establishes.
     """
     if raw is None:
-        raise ValueError("Unrecognized semester value: None")
+        raise InvalidSemesterError("Unrecognized semester value: None", stage="Silver Cleaning")
     text = str(raw).strip().lower()
     if text in ("1", "2"):
         return int(text)
@@ -120,8 +121,9 @@ def normalize_semester_number(raw) -> int:
         return 1
     if text.startswith("2nd"):
         return 2
-    raise ValueError(f"Unrecognized semester value: {raw!r}")
-
+    raise InvalidSemesterError(
+        f"Unrecognized semester value: {raw!r}", stage="Silver Cleaning", details={"raw_value": raw},
+    )
 
 def normalize_semester_number_safe(raw):
     """Non-raising variant: an unrecognized value is returned UNCHANGED
@@ -131,5 +133,5 @@ def normalize_semester_number_safe(raw):
     """
     try:
         return normalize_semester_number(raw)
-    except ValueError:
-        return raw
+    except InvalidSemesterError:
+        return raw  

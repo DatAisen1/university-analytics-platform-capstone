@@ -49,6 +49,10 @@ from pipelines.common.metadata import get_connection, record_run
 from pipelines.common.storage import LocalFileStorage, ObjectStorage
 from pipelines.silver.progression_validation import check_year_level_progression
 
+from pipelines.common.errors import DataQualityFailureError, DuplicateDataError
+
+MAX_QUARANTINE_RATE = 0.25  # same tolerance as business_rules.py
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
 
@@ -190,6 +194,51 @@ def process_enrollment(
         _write_parquet(silver_storage, "silver_quarantine/enrollment/data.parquet", all_quarantined)
 
     quarantine_rate = len(all_quarantined) / rows_in if rows_in else 0.0
+
+    # AFTER
+    # Task 47: escalate to a categorized, traceable failure -- rather
+    # than a SUCCESS row -- once quarantine consumes too much of the
+    # batch to trust the output silently.
+    if rows_in and quarantine_rate > MAX_QUARANTINE_RATE:
+        error = DataQualityFailureError(
+            f"Silver enrollment validation quarantined {len(all_quarantined)}/{rows_in} rows "
+            f"({quarantine_rate:.1%}) -- exceeds the {MAX_QUARANTINE_RATE:.0%} tolerance.",
+            stage="Silver Validation & Dedup", entity="enrollment", rows_affected=len(all_quarantined),
+            details={
+                "quarantined_unknown_status": len(quarantine_unknown),
+                "quarantined_range": len(quarantine_range),
+                "quarantined_consistency": len(quarantine_consistency),
+                "quarantined_progression": len(quarantine_progression),
+            },
+        )
+        record_run(
+            meta_conn, run_id, batch_id=run_id, stage=STAGE, entity="enrollment", partition_key="all",
+            started_at=started_at, status="FAILED", rows_in=rows_in, source_path="silver/enrollment",
+            error_message=error.message, error_category=error.category.value, rows_affected=error.rows_affected,
+        )
+        if owns_conn:
+            meta_conn.close()
+        raise error
+
+    # Task 47: a very high raw duplicate rate (as opposed to
+    # cross-entity/status quarantine) gets its own DUPLICATE_DATA
+    # category -- distinct diagnosis from "the data is malformed".
+    duplicate_rate = duplicate_count / rows_in if rows_in else 0.0
+    if rows_in and duplicate_rate > MAX_QUARANTINE_RATE:
+        error = DuplicateDataError(
+            f"Silver enrollment dedup dropped {duplicate_count}/{rows_in} rows ({duplicate_rate:.1%}) "
+            f"as duplicates -- exceeds the {MAX_QUARANTINE_RATE:.0%} tolerance; check upstream ingestion "
+            f"for a re-sent batch.",
+            stage="Silver Validation & Dedup", entity="enrollment", rows_affected=duplicate_count,
+        )
+        record_run(
+            meta_conn, run_id, batch_id=run_id, stage=STAGE, entity="enrollment", partition_key="all",
+            started_at=started_at, status="FAILED", rows_in=rows_in, source_path="silver/enrollment",
+            error_message=error.message, error_category=error.category.value, rows_affected=error.rows_affected,
+        )
+        if owns_conn:
+            meta_conn.close()
+        raise error
 
     record_run(
         meta_conn, run_id, batch_id=run_id, stage=STAGE, entity="enrollment", partition_key="all",

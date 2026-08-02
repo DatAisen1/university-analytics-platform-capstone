@@ -29,18 +29,20 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List
-
+from pipelines.common.errors import InvalidSchemaError
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-class ConfigError(Exception):
-    """Raised for any reference-data config problem: missing file, malformed
-    YAML, schema violation, or cross-reference violation. Callers only need
-    to catch this one exception type — they don't need to know whether the
-    root cause was a YAML syntax error or a pydantic validation error."""
+class ConfigError(InvalidSchemaError):
+    """Raised for any reference-data config problem: missing file,
+    malformed YAML, schema violation, or cross-reference violation.
+    Now a subclass of InvalidSchemaError (Task 46) -- callers that
+    already do `except ConfigError:` are unaffected; new code can catch
+    `PipelineError` uniformly and get category=INVALID_SCHEMA."""
 
-
+    def __init__(self, message: str, *, stage: str = "Reference Data Config", **kwargs):
+        super().__init__(message, stage=stage, **kwargs)
 class ProgramLevel(str, Enum):
     BACHELOR = "Bachelor"
     CERTIFICATE = "Certificate"
