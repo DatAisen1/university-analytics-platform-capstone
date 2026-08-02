@@ -1,51 +1,22 @@
 """
 orchestration/assets.py
 
-Dagster asset-based orchestration for the full Bronze -> Silver -> Gold ->
-dbt pipeline, matching docs/02_System_Architecture.md's orchestration
-diagram exactly: each Dagster asset corresponds to one node in that
-diagram, and the dependency edges Dagster infers from function
-parameters ARE the lineage graph shown in the Dagster UI.
-
-Deliberately NOT included as a Dagster asset: the data_generator/ scripts
-(Days 4-6). Those stand in for a real Student Information System producing
-semester extracts -- Dagster orchestrates what happens to data once it
-ARRIVES (matching the architecture diagram's "Semester Data Arrives ->
-Orchestrator: Dagster -> ingest_to_bronze -> ..."), not the external
-system that produces it.
-
-Why Dagster's asset model, not Airflow's DAG-of-tasks model (see
-docs/07_Technology_Stack.md's comparison): "software-defined assets" map
-almost one-to-one onto Bronze/Silver/Gold, which ARE assets (persistent
-data, not just steps in a workflow) -- the lineage graph this file
-produces IS the medallion architecture diagram, not an abstraction over it.
-
-On the dbt integration: a fuller `dagster-dbt` integration (one Dagster
-asset PER dbt model, auto-generated from the manifest via @dbt_assets)
-is the more idiomatic production pattern. This project uses a single
-subprocess-wrapped asset instead -- a reasonable, honest capstone-scope
-choice that still demonstrates the orchestration principle (dbt as one
-node with real upstream/downstream edges), deferred to
-docs/14_Future_Improvements.md as the natural next step rather than
-built now.
-
-Note: `from __future__ import annotations` is intentionally NOT used in
-this file. Dagster's @asset decorator inspects the `context` parameter's
-real type at runtime to decide what to inject; postponed evaluation
-(PEP 563) would turn that annotation into the string
-"AssetExecutionContext" instead of the actual class, and Dagster's
-decorator does not re-resolve it -- it fails with a confusing error
-("must be annotated with AssetExecutionContext...") even though the
-annotation visually says exactly that. Found by hitting the error
-directly, not by reading Dagster's source in advance.
+Dagster asset-based orchestration for the full university analytics
+pipeline. The lineage is expressed explicitly as a single staged graph:
+ingestion -> bronze -> silver -> validation -> gold -> warehouse ->
+features -> training -> evaluation -> forecast.
 """
 
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dagster import AssetExecutionContext, MetadataValue, asset
 
+from models.forecasting.deploy_forecast import deploy_forecasts
+from models.forecasting.train_prophet import evaluate_all_series, train_final_models, write_evaluation_report
+from pipelines.common.metadata import get_connection, record_pipeline_run
 from pipelines.gold.build_dimensions import build_all_dimensions
 from pipelines.gold.build_facts import build_all_facts
 from pipelines.gold.build_kpi import build_kpi
@@ -59,127 +30,224 @@ from pipelines.silver.validate_and_dedupe import process_enrollment
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-@asset(group_name="bronze")
-def bronze_layer(context: AssetExecutionContext) -> None:
-    """Batch ingestion: data_generator's output -> Bronze Parquet, stamped
-    with audit metadata (Day 8), schema-validated as a post-write check
-    (Day 9)."""
-    results = ingest_all()
-    counts = {}
-    for r in results:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    context.add_output_metadata({"result_counts": MetadataValue.json(counts)})
-
-
-@asset(group_name="silver", deps=[bronze_layer])
-def silver_cleaned(context: AssetExecutionContext) -> None:
-    """Bronze -> Silver cleaning: text hygiene + enrollment_status
-    normalization via DuckDB SQL (Day 10)."""
-    results = clean_all()
-    rows_by_entity = {r["entity"]: r.get("rows", 0) for r in results if r["status"] == "SUCCESS"}
-    context.add_output_metadata({"rows_by_entity": MetadataValue.json(rows_by_entity)})
-
-
-@asset(group_name="silver", deps=[silver_cleaned])
-def silver_validated(context: AssetExecutionContext) -> None:
-    """Dedup (last-write-wins) + business-rule quarantine on enrollment
-    (Day 11)."""
-    summary = process_enrollment()
-    context.add_output_metadata({
-        "rows_out": summary["rows_out"],
-        "duplicates_dropped": summary["duplicates_dropped"],
-        "quarantine_rate": MetadataValue.text(f"{summary['quarantine_rate']:.2%}"),
-    })
-
-# AFTER
-@asset(group_name="warehouse", deps=[silver_validated])
-def silver_in_postgres(context: AssetExecutionContext) -> None:
-    """Materializes Silver Parquet into real Postgres silver.* tables via
-    pipeline_writer, using the same TRUNCATE-safe writer Gold uses. This
-    was previously implemented (pipelines/silver/load_silver_to_postgres.py)
-    but never wired into the asset graph -- meaning a full pipeline run
-    left Postgres's `silver` schema permanently empty despite it having
-    full DDL and RBAC grants. Fixed here (Task 29)."""
-    password = os.environ["PIPELINE_WRITER_PASSWORD"]
-    engine = build_pipeline_writer_engine(password)
-    counts = load_silver_to_postgres(engine)
-    context.add_output_metadata({"row_counts": MetadataValue.json(counts)})
-
-
-@asset(group_name="gold", deps=[silver_validated])
-def gold_dimensions(context: AssetExecutionContext) -> None:
-    """dim_academic_period, dim_calendar, dim_year_level, dim_gender,
-    dim_college, dim_program, and dim_student (real SCD2 history)
-    (Day 12; renamed/re-modeled per Task 23/24 -- see
-    pipelines/gold/build_dimensions.py's module docstring)."""
-    counts = build_all_dimensions()
-    context.add_output_metadata({"row_counts": MetadataValue.json(counts)})
-
-@asset(group_name="gold", deps=[gold_dimensions])
-def gold_facts(context: AssetExecutionContext) -> None:
-    """fact_enrollment, fact_graduation, fact_dropout, fact_shifter,
-    fact_retention -- resolved via AS-OF join against dim_student's SCD2
-    history (Day 13)."""
-    counts = build_all_facts()
-    context.add_output_metadata({"row_counts": MetadataValue.json(counts)})
-
-
-@asset(group_name="gold", deps=[gold_facts])
-def gold_kpi(context: AssetExecutionContext) -> None:
-    """fact_institution_kpi: the weighted Success Rate composite
-    (Day 14)."""
-    summary = build_kpi()
-    context.add_output_metadata({"rows": summary["rows"]})
-
-
-@asset(group_name="warehouse", deps=[gold_kpi])
-def gold_in_postgres(context: AssetExecutionContext) -> None:
-    """Materializes Gold Parquet into real Postgres gold.* tables via
-    pipeline_writer (Day 15's RBAC role for exactly this), using
-    TRUNCATE + append so dbt's dependent staging views survive a reload
-    (Day 16's fix)."""
-    password = os.environ["PIPELINE_WRITER_PASSWORD"]
-    engine = build_pipeline_writer_engine(password)
-    counts = load_gold_to_postgres(engine)
-    context.add_output_metadata({"row_counts": MetadataValue.json(counts)})
-
-
-@asset(group_name="analytics", deps=[gold_in_postgres])
-def ml_forecast_features(context: AssetExecutionContext) -> None:
-    """gold.ml_forecast_features: leakage-free lag/rolling/trend/
-    seasonality features per college per semester, built via SQL window
-    functions (Day 19). A sibling of dbt_staging_and_marts, not a
-    dependency of it -- dbt's marts don't consume ML features, and the ML
-    features don't need dbt's marts, so there's no real ordering
-    constraint between them, only a shared upstream (gold_in_postgres)."""
-    password = os.environ["PIPELINE_WRITER_PASSWORD"]
-    engine = build_pipeline_writer_engine(password)
-    row_count = build_and_store_ml_features(engine)
-    context.add_output_metadata({"rows": row_count})
-
-
-@asset(group_name="analytics", deps=[gold_in_postgres])
-def dbt_staging_and_marts(context: AssetExecutionContext) -> None:
-    """Runs the full dbt project (12 staging views + 5 marts) and its
-    test suite against the live warehouse (Days 16-17)."""
-    env = dict(os.environ)
-    env["DBT_PROFILES_DIR"] = str(_REPO_ROOT / "dbt")
-
-    run_result = subprocess.run(
-        ["dbt", "run", "--project-dir", str(_REPO_ROOT / "dbt")],
-        capture_output=True, text=True, env=env,
+def _track_asset_run(context: AssetExecutionContext, stage: str, handler):
+    started_at = datetime.now(timezone.utc)
+    conn = get_connection()
+    record_pipeline_run(
+        conn,
+        run_id=context.run_id,
+        stage=stage,
+        status="RUNNING",
+        started_at=started_at,
+        completed_at=None,
+        records_processed=0,
+        error="",
     )
-    if run_result.returncode != 0:
-        raise RuntimeError(f"dbt run failed:\n{run_result.stdout}\n{run_result.stderr}")
+    try:
+        result = handler()
+        completed_at = datetime.now(timezone.utc)
+        record_pipeline_run(
+            conn,
+            run_id=context.run_id,
+            stage=stage,
+            status="SUCCESS",
+            started_at=started_at,
+            completed_at=completed_at,
+            records_processed=result["records_processed"] if isinstance(result, dict) else 0,
+            error="",
+        )
+        return result
+    except Exception as exc:  # pragma: no cover - error path exercised via Dagster runtime
+        completed_at = datetime.now(timezone.utc)
+        record_pipeline_run(
+            conn,
+            run_id=context.run_id,
+            stage=stage,
+            status="FAILED",
+            started_at=started_at,
+            completed_at=completed_at,
+            records_processed=0,
+            error=str(exc),
+        )
+        raise
 
-    test_result = subprocess.run(
-        ["dbt", "test", "--project-dir", str(_REPO_ROOT / "dbt")],
-        capture_output=True, text=True, env=env,
-    )
-    if test_result.returncode != 0:
-        raise RuntimeError(f"dbt test failed:\n{test_result.stdout}\n{test_result.stderr}")
 
+@asset(group_name="ingestion")
+def ingestion(context: AssetExecutionContext) -> dict:
+    """Materializes the inbound semester extract into bronze data."""
+
+    def _run() -> dict:
+        results = ingest_all()
+        counts = {}
+        for item in results:
+            counts[item["status"]] = counts.get(item["status"], 0) + 1
+        return {"records_processed": sum(item.get("rows", 0) for item in results if item.get("status") == "SUCCESS"), "result_counts": counts}
+
+    result = _track_asset_run(context, "ingestion", _run)
+    context.add_output_metadata({"result_counts": MetadataValue.json(result["result_counts"]), "records_processed": result["records_processed"]})
+    return result
+
+
+@asset(group_name="bronze", deps=[ingestion])
+def bronze(context: AssetExecutionContext) -> dict:
+    """Persists the bronze layer and ensures the ingestion output is available for downstream cleaning."""
+
+    def _run() -> dict:
+        results = ingest_all()
+        counts = {}
+        for item in results:
+            counts[item["status"]] = counts.get(item["status"], 0) + 1
+        return {"records_processed": sum(item.get("rows", 0) for item in results if item.get("status") == "SUCCESS"), "result_counts": counts}
+
+    result = _track_asset_run(context, "bronze", _run)
+    context.add_output_metadata({"result_counts": MetadataValue.json(result["result_counts"]), "records_processed": result["records_processed"]})
+    return result
+
+
+@asset(group_name="silver", deps=[bronze])
+def silver(context: AssetExecutionContext) -> dict:
+    """Runs bronze-to-silver cleaning so downstream validation uses cleansed data."""
+
+    def _run() -> dict:
+        results = clean_all()
+        rows_by_entity = {item["entity"]: item.get("rows", 0) for item in results if item["status"] == "SUCCESS"}
+        return {"records_processed": sum(rows_by_entity.values()), "rows_by_entity": rows_by_entity}
+
+    result = _track_asset_run(context, "silver", _run)
+    context.add_output_metadata({"rows_by_entity": MetadataValue.json(result["rows_by_entity"]), "records_processed": result["records_processed"]})
+    return result
+
+
+@asset(group_name="validation", deps=[silver])
+def validation(context: AssetExecutionContext) -> dict:
+    """Applies validation and deduplication before gold modeling begins."""
+
+    def _run() -> dict:
+        summary = process_enrollment()
+        return {
+            "records_processed": summary["rows_out"],
+            "duplicates_dropped": summary["duplicates_dropped"],
+            "quarantine_rate": summary["quarantine_rate"],
+        }
+
+    result = _track_asset_run(context, "validation", _run)
     context.add_output_metadata({
-        "dbt_run_output": MetadataValue.text(run_result.stdout[-2000:]),
-        "dbt_test_output": MetadataValue.text(test_result.stdout[-2000:]),
+        "rows_out": result["records_processed"],
+        "duplicates_dropped": result["duplicates_dropped"],
+        "quarantine_rate": MetadataValue.text(f"{result['quarantine_rate']:.2%}"),
     })
+    return result
+
+
+@asset(group_name="gold", deps=[validation])
+def gold(context: AssetExecutionContext) -> dict:
+    """Builds the gold dimensions, facts, and KPI layer from validated silver data."""
+
+    def _run() -> dict:
+        dimension_counts = build_all_dimensions()
+        fact_counts = build_all_facts()
+        kpi_summary = build_kpi()
+        return {
+            "records_processed": kpi_summary["rows"],
+            "dimension_counts": dimension_counts,
+            "fact_counts": fact_counts,
+            "kpi_rows": kpi_summary["rows"],
+        }
+
+    result = _track_asset_run(context, "gold", _run)
+    context.add_output_metadata({
+        "dimension_counts": MetadataValue.json(result["dimension_counts"]),
+        "fact_counts": MetadataValue.json(result["fact_counts"]),
+        "kpi_rows": result["kpi_rows"],
+    })
+    return result
+
+
+@asset(group_name="warehouse", deps=[gold])
+def warehouse(context: AssetExecutionContext) -> dict:
+    """Loads the gold layer into the warehouse so downstream ML assets consume validated data."""
+
+    def _run() -> dict:
+        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        engine = build_pipeline_writer_engine(password)
+        counts = load_gold_to_postgres(engine)
+        return {"records_processed": sum(counts.values()), "row_counts": counts}
+
+    result = _track_asset_run(context, "warehouse", _run)
+    context.add_output_metadata({"row_counts": MetadataValue.json(result["row_counts"]), "records_processed": result["records_processed"]})
+    return result
+
+
+@asset(group_name="features", deps=[warehouse])
+def features(context: AssetExecutionContext) -> dict:
+    """Builds leakage-safe forecasting features from the warehouse-backed gold data."""
+
+    def _run() -> dict:
+        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        engine = build_pipeline_writer_engine(password)
+        row_count = build_and_store_ml_features(engine)
+        return {"records_processed": row_count, "row_count": row_count}
+
+    result = _track_asset_run(context, "features", _run)
+    context.add_output_metadata({"rows": result["row_count"]})
+    return result
+
+
+@asset(group_name="training", deps=[features])
+def training(context: AssetExecutionContext) -> dict:
+    """Trains forecasting models for each series after the feature layer is ready."""
+
+    def _run() -> dict:
+        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        engine = build_pipeline_writer_engine(password)
+        saved_paths = train_final_models(engine)
+        return {"records_processed": len(saved_paths), "saved_paths": saved_paths}
+
+    result = _track_asset_run(context, "training", _run)
+    context.add_output_metadata({"saved_paths": MetadataValue.json(result["saved_paths"]), "records_processed": result["records_processed"]})
+    return result
+
+
+@asset(group_name="evaluation", deps=[training])
+def evaluation(context: AssetExecutionContext) -> dict:
+    """Runs walk-forward evaluation and writes the evaluation report for the trained models."""
+
+    def _run() -> dict:
+        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        engine = build_pipeline_writer_engine(password)
+        report = evaluate_all_series(engine)
+        csv_path, md_path = write_evaluation_report(report)
+        return {"records_processed": len(report), "report_path": str(csv_path), "summary_path": str(md_path)}
+
+    result = _track_asset_run(context, "evaluation", _run)
+    context.add_output_metadata({"records_processed": result["records_processed"], "report_path": result["report_path"], "summary_path": result["summary_path"]})
+    return result
+
+
+@asset(group_name="forecast", deps=[evaluation])
+def forecast(context: AssetExecutionContext) -> dict:
+    """Deploys the promoted forecasting model to produce the next period forecast."""
+
+    def _run() -> dict:
+        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        engine = build_pipeline_writer_engine(password)
+        deployments = deploy_forecasts(engine)
+        return {"records_processed": len(deployments), "deployments": [deployment.__dict__ for deployment in deployments]}
+
+    result = _track_asset_run(context, "forecast", _run)
+    context.add_output_metadata({"records_processed": result["records_processed"], "deployments": MetadataValue.json(result["deployments"])})
+    return result
+
+
+all_assets = [
+    ingestion,
+    bronze,
+    silver,
+    validation,
+    gold,
+    warehouse,
+    features,
+    training,
+    evaluation,
+    forecast,
+]

@@ -42,11 +42,24 @@ CREATE TABLE IF NOT EXISTS pipeline_run_log (
 )
 """
 
+_CREATE_DAGSTER_RUNS_SQL = """
+CREATE TABLE IF NOT EXISTS dagster_pipeline_runs (
+    run_id            VARCHAR,
+    stage             VARCHAR,
+    status            VARCHAR,
+    started_at        TIMESTAMP,
+    completed_at      TIMESTAMP,
+    records_processed INTEGER,
+    error             VARCHAR
+)
+"""
+
 
 def get_connection(db_path: Path = DEFAULT_META_DB_PATH) -> duckdb.DuckDBPyConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db_path))
     conn.execute(_CREATE_TABLE_SQL)
+    conn.execute(_CREATE_DAGSTER_RUNS_SQL)
     return conn
 
 
@@ -134,6 +147,29 @@ def record_success_once(
     except Exception:
         conn.rollback()
         raise
+
+
+def record_pipeline_run(
+    conn: duckdb.DuckDBPyConnection,
+    run_id: str,
+    stage: str,
+    status: str,
+    started_at,
+    completed_at=None,
+    records_processed: int = 0,
+    error: str = "",
+) -> None:
+    if isinstance(started_at, str):
+        started_at = datetime.fromisoformat(started_at)
+    if completed_at is None:
+        completed_at = datetime.now(timezone.utc)
+    elif isinstance(completed_at, str):
+        completed_at = datetime.fromisoformat(completed_at)
+
+    conn.execute(
+        "INSERT INTO dagster_pipeline_runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [run_id, stage, status, started_at, completed_at, records_processed, error],
+    )
 
 
 def get_run_log(conn: duckdb.DuckDBPyConnection):

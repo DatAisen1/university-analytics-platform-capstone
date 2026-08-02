@@ -38,29 +38,31 @@ def test_definitions_loads_without_error():
 
 
 def test_asset_dependency_order_matches_architecture_diagram():
-    """docs/02_System_Architecture.md's orchestration diagram, in order:
-    ingest_to_bronze -> bronze_to_silver -> silver_to_gold -> dbt run+test
-    (+ ml_forecast_features, added Day 19, a sibling of the dbt asset).
-    ml_forecast_features and dbt_staging_and_marts have no ordering
-    constraint between each other (both only depend on gold_in_postgres),
-    so either could legally come first in a toposort."""
+    """The orchestrator should expose an explicit stage-by-stage lineage.
+    The ML branch must only run once the warehouse-ready gold data is
+    available and validated."""
     from orchestration.definitions import defs
 
     resolved = defs.resolve_asset_graph()
     order = [key.to_user_string() for key in resolved.toposorted_asset_keys]
 
     prerequisite_order = [
-        "bronze_layer", "silver_cleaned", "silver_validated",
-        "gold_dimensions", "gold_facts", "gold_kpi", "gold_in_postgres",
+        "ingestion",
+        "bronze",
+        "silver",
+        "validation",
+        "gold",
+        "warehouse",
+        "features",
+        "training",
+        "evaluation",
+        "forecast",
     ]
-    assert order[:7] == prerequisite_order
-    assert set(order[7:]) == {"ml_forecast_features", "dbt_staging_and_marts"}
+    assert order[:10] == prerequisite_order
 
 
 def test_each_asset_depends_only_on_its_documented_predecessor():
-    """A stronger check than toposort order alone: toposort only proves
-    A VALID ordering exists, not that the edges themselves are what's
-    documented."""
+    """Each explicit stage should only depend on the immediately prior stage."""
     from orchestration.definitions import defs
 
     resolved = defs.resolve_asset_graph()
@@ -69,15 +71,16 @@ def test_each_asset_depends_only_on_its_documented_predecessor():
         from dagster import AssetKey
         return {k.to_user_string() for k in resolved.get(AssetKey(name)).parent_keys}
 
-    assert upstream_of("bronze_layer") == set()
-    assert upstream_of("silver_cleaned") == {"bronze_layer"}
-    assert upstream_of("silver_validated") == {"silver_cleaned"}
-    assert upstream_of("gold_dimensions") == {"silver_validated"}
-    assert upstream_of("gold_facts") == {"gold_dimensions"}
-    assert upstream_of("gold_kpi") == {"gold_facts"}
-    assert upstream_of("gold_in_postgres") == {"gold_kpi"}
-    assert upstream_of("ml_forecast_features") == {"gold_in_postgres"}
-    assert upstream_of("dbt_staging_and_marts") == {"gold_in_postgres"}
+    assert upstream_of("ingestion") == set()
+    assert upstream_of("bronze") == {"ingestion"}
+    assert upstream_of("silver") == {"bronze"}
+    assert upstream_of("validation") == {"silver"}
+    assert upstream_of("gold") == {"validation"}
+    assert upstream_of("warehouse") == {"gold"}
+    assert upstream_of("features") == {"warehouse"}
+    assert upstream_of("training") == {"features"}
+    assert upstream_of("evaluation") == {"training"}
+    assert upstream_of("forecast") == {"evaluation"}
 
 
 def test_schedule_cadence_is_twice_yearly_not_a_shorter_cycle():
@@ -89,10 +92,38 @@ def test_schedule_cadence_is_twice_yearly_not_a_shorter_cycle():
     assert len(months) == 2
 
 
-def test_full_pipeline_job_selects_all_nine_assets():
+def test_full_pipeline_job_selects_all_ten_assets():
     from orchestration.definitions import all_assets, full_pipeline_job
-    assert len(all_assets) == 9
+    assert len(all_assets) == 10
     assert full_pipeline_job.name == "full_pipeline_job"
+
+
+def test_pipeline_run_tracking_helper_writes_expected_fields():
+    from pipelines.common.metadata import get_connection, record_pipeline_run
+    from pathlib import Path
+
+    db_path = Path("warehouse/test_pipeline_runs.duckdb")
+    if db_path.exists():
+        db_path.unlink()
+
+    conn = get_connection(db_path)
+    record_pipeline_run(
+        conn,
+        run_id="run-123",
+        stage="training",
+        status="SUCCESS",
+        started_at="2026-08-03T00:00:00+00:00",
+        completed_at="2026-08-03T00:01:00+00:00",
+        records_processed=42,
+        error="",
+    )
+
+    row = conn.execute(
+        "SELECT run_id, stage, status, records_processed, error FROM dagster_pipeline_runs WHERE run_id = ?",
+        ["run-123"],
+    ).fetchone()
+
+    assert row == ("run-123", "training", "SUCCESS", 42, "")
 
 
 def _postgres_available() -> bool:

@@ -22,37 +22,12 @@ Run the Dagster UI (webserver) via:
 
 from dagster import Definitions, ScheduleDefinition, define_asset_job
 
-# AFTER
-from orchestration.assets import (
-    bronze_layer,
-    dbt_staging_and_marts,
-    gold_dimensions,
-    gold_facts,
-    gold_in_postgres,
-    gold_kpi,
-    ml_forecast_features,
-    silver_cleaned,
-    silver_in_postgres,
-    silver_validated,
-)
-
-all_assets = [
-    bronze_layer,
-    silver_cleaned,
-    silver_validated,
-    silver_in_postgres,
-    gold_dimensions,
-    gold_facts,
-    gold_kpi,
-    gold_in_postgres,
-    ml_forecast_features,
-    dbt_staging_and_marts,
-]
+from orchestration.assets import all_assets
 
 full_pipeline_job = define_asset_job(
     name="full_pipeline_job",
     selection=all_assets,
-    description="Materializes the entire Bronze -> Silver -> Gold -> dbt pipeline, in dependency order.",
+    description="Materializes the full ingestion -> bronze -> silver -> validation -> gold -> warehouse -> features -> training -> evaluation -> forecast pipeline in dependency order.",
 )
 
 semester_schedule = ScheduleDefinition(

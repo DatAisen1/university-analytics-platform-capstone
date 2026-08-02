@@ -126,6 +126,129 @@ class RetrainDecision:
     reason: str
 
 
+def get_last_trained_period_ordinal(engine, college_key: int, metric: str) -> Optional[int]:
+    """Return the last training window end for a series, if the registry is available."""
+    if engine is None:
+        return None
+    try:
+        conn = engine.raw_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT training_data_end_period_ordinal
+                FROM gold.model_registry
+                WHERE college_key = %s AND metric = %s
+                ORDER BY trained_at DESC, model_registry_key DESC
+                LIMIT 1
+                """,
+                (college_key, metric),
+            )
+            row = cur.fetchone()
+        conn.close()
+    except Exception:
+        return None
+    return None if row is None or row[0] is None else int(row[0])
+
+
+def get_current_champion(engine, college_key: int, metric: str) -> Optional[ChampionRecord]:
+    """Return the current champion row for a series, if one exists."""
+    if engine is None:
+        return None
+    try:
+        conn = engine.raw_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT model_registry_key, model_version, mae, artifact_path
+                FROM gold.model_registry
+                WHERE college_key = %s AND metric = %s AND is_champion IS TRUE
+                ORDER BY trained_at DESC, model_registry_key DESC
+                LIMIT 1
+                """,
+                (college_key, metric),
+            )
+            row = cur.fetchone()
+        conn.close()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return ChampionRecord(
+        model_registry_key=int(row[0]),
+        model_version=row[1],
+        mae=float(row[2]),
+        artifact_path=row[3],
+    )
+
+
+def record_candidate(
+    engine,
+    college_key: int,
+    metric: str,
+    model_version: str,
+    candidate: CandidateMetrics,
+    training_meta: TrainingMetadata,
+    artifact_path: str,
+    decision: PromotionDecision,
+) -> int:
+    """Insert a candidate row into gold.model_registry and return its key."""
+    if engine is None:
+        return 0
+    try:
+        conn = engine.raw_connection()
+        try:
+            with conn.cursor() as cur:
+                if decision.promote:
+                    cur.execute(
+                        """
+                        UPDATE gold.model_registry
+                        SET is_champion = FALSE
+                        WHERE college_key = %s AND metric = %s AND is_champion IS TRUE
+                        """,
+                        (college_key, metric),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO gold.model_registry (
+                        college_key, metric, model_version, mae, rmse, mape, r2,
+                        best_baseline_mae, beats_baseline, is_champion, rejected_reason,
+                        artifact_path, algorithm, training_data_start_period_ordinal,
+                        training_data_end_period_ordinal, training_record_count
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING model_registry_key
+                    """,
+                    (
+                        college_key,
+                        metric,
+                        model_version,
+                        candidate.mae,
+                        candidate.rmse,
+                        candidate.mape,
+                        candidate.r2,
+                        candidate.best_baseline_mae,
+                        candidate.beats_baseline,
+                        decision.promote,
+                        None if decision.promote else decision.reason,
+                        artifact_path,
+                        training_meta.algorithm,
+                        training_meta.training_data_start_period_ordinal,
+                        training_meta.training_data_end_period_ordinal,
+                        training_meta.training_record_count,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+    return int(row[0]) if row is not None else 0
+
+
 def decide_promotion(candidate: CandidateMetrics, champion: Optional[ChampionRecord]) -> PromotionDecision:
     """Pure promotion rule -- see module docstring for the two criteria."""
     if not candidate.beats_baseline:
