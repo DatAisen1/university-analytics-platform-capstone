@@ -1,7 +1,8 @@
 """
 orchestration/definitions.py
 
-The Dagster entry point: wires orchestration/assets.py's 9 assets into a
+
+Dagster entry point: wires orchestration/assets.py's 10 assets into a
 single job (materialize everything, Bronze through dbt marts + ML
 features) and a schedule matching a real registrar's actual cadence.
 
@@ -21,6 +22,7 @@ Run the Dagster UI (webserver) via:
 
 from dagster import Definitions, ScheduleDefinition, define_asset_job
 
+# AFTER
 from orchestration.assets import (
     bronze_layer,
     dbt_staging_and_marts,
@@ -30,6 +32,7 @@ from orchestration.assets import (
     gold_kpi,
     ml_forecast_features,
     silver_cleaned,
+    silver_in_postgres,
     silver_validated,
 )
 
@@ -37,6 +40,7 @@ all_assets = [
     bronze_layer,
     silver_cleaned,
     silver_validated,
+    silver_in_postgres,
     gold_dimensions,
     gold_facts,
     gold_kpi,

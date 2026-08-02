@@ -1,15 +1,17 @@
 """
 pipelines/common/metadata.py
 
-The pipeline_run_log metadata store described in docs/03_Data_Engineering.md
-Section 8 ("Pipeline Monitoring & Metadata Tracking") and docs/06_Data_Warehouse.md's
-`meta` schema. Backed by DuckDB -- a real, queryable, file-based database
-that runs in-process (no server needed), which is why it's usable here
-even without the Postgres warehouse running. In production this table
-would live in Postgres's `meta` schema alongside everything else; the
-schema and the idempotency logic built on top of it are identical either
-way, so nothing here needs to change when Postgres comes online in
-Week 3 -- only the connection target does.
+The pipeline_run_log metadata store. Backed by DuckDB -- a real,
+queryable, file-based database that runs in-process (no server needed).
+
+This is a deliberate, permanent split from Postgres's `meta` schema, not
+a temporary stand-in waiting to be migrated -- see
+docs/15_Tooling_Responsibility_Matrix.md for the full rationale.
+Postgres's `meta` schema tracks schema_migrations (which DDL has been
+applied); this file tracks pipeline_run_log (which data loads have
+succeeded). Bronze/Silver/Gold idempotency checks must work even when
+Postgres isn't reachable (local dev, CI, first bootstrap), so this stays
+on DuckDB even though Postgres is fully online.
 """
 
 from __future__ import annotations

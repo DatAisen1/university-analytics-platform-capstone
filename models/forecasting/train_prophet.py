@@ -8,11 +8,11 @@ Section 5 specifies, compares it against the two required baselines
 history for each series (used by Day 21 to actually forecast the next
 semester).
 
-Walk-forward folds (docs/10_Forecasting.md, semester_key terms):
-  Fold 1: train semester_key 1-4, test semester_key 5 (2023-1)
-  Fold 2: train semester_key 1-5, test semester_key 6 (2023-2)
-  Fold 3: train semester_key 1-6, test semester_key 7 (2024-1)
-  Fold 4: train semester_key 1-7, test semester_key 8 (2024-2)
+Walk-forward folds (docs/10_Forecasting.md, period_ordinal terms):
+  Fold 1: train period_ordinal 1-4, test period_ordinal 5 (2023-1)
+  Fold 2: train period_ordinal 1-5, test period_ordinal 6 (2023-2)
+  Fold 3: train period_ordinal 1-6, test period_ordinal 7 (2024-1)
+  Fold 4: train period_ordinal 1-7, test period_ordinal 8 (2024-2)
 
 Each fold trains ONLY on data strictly before its test point -- the
 walk-forward discipline docs/10_Forecasting.md requires specifically
@@ -45,7 +45,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ARTIFACTS_DIR = _REPO_ROOT / "forecasting" / "artifacts"
 
 TARGET_METRICS = ["enrollment_count", "graduation_count"]
-TEST_SEMESTER_KEYS = [5, 6, 7, 8]  # the 4 walk-forward test points, per the fold table above
+TEST_PERIOD_ORDINALS = [5, 6, 7, 8]  # the 4 walk-forward test points, per the fold table above
 
 
 def semester_to_date(academic_year: int, semester_number: int) -> str:
@@ -54,17 +54,24 @@ def semester_to_date(academic_year: int, semester_number: int) -> str:
 
 
 def load_series(engine) -> pd.DataFrame:
-    """One row per (college, semester): college_key, college_id,
-    semester_key, ds, and each target metric's actual value."""
+    """One row per (college, period): college_key, college_id,
+    period_ordinal, ds, and each target metric's actual value.
+
+    Fixed to reference gold.dim_academic_period / academic_period_key --
+    gold.dim_semester / semester_key no longer exist post Task 23/24's
+    dimensional redesign. Ordered by period_ordinal, not the
+    academic_period_key surrogate, for the same chronological-ordering
+    reason documented in build_kpi.py and build_ml_features.py.
+    """
     sql = f"""
         SELECT
-            kpi.college_key, col.college_id, kpi.semester_key,
-            sem.academic_year, sem.semester_number,
+            kpi.college_key, col.college_id, ap.period_ordinal,
+            ap.academic_year, ap.semester_number,
             {', '.join(f'kpi.{m}' for m in TARGET_METRICS)}
         FROM gold.fact_institution_kpi kpi
         JOIN gold.dim_college col ON kpi.college_key = col.college_key
-        JOIN gold.dim_semester sem ON kpi.semester_key = sem.semester_key
-        ORDER BY kpi.college_key, kpi.semester_key
+        JOIN gold.dim_academic_period ap ON kpi.academic_period_key = ap.academic_period_key
+        ORDER BY kpi.college_key, ap.period_ordinal
     """
     df = pd.read_sql(sql, engine)
     df["ds"] = df.apply(lambda r: semester_to_date(int(r["academic_year"]), int(r["semester_number"])), axis=1)
@@ -105,16 +112,16 @@ def walk_forward_evaluate(
     Returns {model_name: {"actual": [...], "predicted": [...]}} with one
     entry per fold, for prophet/naive/historical_avg.
     """
-    series = college_series.sort_values("semester_key").reset_index(drop=True)
+    series = college_series.sort_values("period_ordinal").reset_index(drop=True)
     results: Dict[str, Dict[str, List[float]]] = {
         "prophet": {"actual": [], "predicted": []},
         "naive": {"actual": [], "predicted": []},
         "historical_avg": {"actual": [], "predicted": []},
     }
 
-    for test_key in TEST_SEMESTER_KEYS:
-        train = series[series["semester_key"] < test_key]
-        test_row = series[series["semester_key"] == test_key]
+    for test_key in TEST_PERIOD_ORDINALS:
+        train = series[series["period_ordinal"] < test_key]
+        test_row = series[series["period_ordinal"] == test_key]
         if train.empty or test_row.empty:
             continue
 
@@ -194,7 +201,7 @@ def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> L
     saved_paths = []
 
     for college_id in sorted(df["college_id"].unique()):
-        college_series = df[df["college_id"] == college_id].sort_values("semester_key")
+        college_series = df[df["college_id"] == college_id].sort_values("period_ordinal")
         for metric in TARGET_METRICS:
             train_df = college_series.rename(columns={metric: "y_col"})
             model = fit_prophet(train_df)

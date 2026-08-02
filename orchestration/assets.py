@@ -53,6 +53,7 @@ from pipelines.gold.build_ml_features import build_and_store_ml_features
 from pipelines.gold.load_gold_to_postgres import build_pipeline_writer_engine, load_gold_to_postgres
 from pipelines.ingestion.ingest_to_bronze import ingest_all
 from pipelines.silver.clean_entities import clean_all
+from pipelines.silver.load_silver_to_postgres import load_silver_to_postgres
 from pipelines.silver.validate_and_dedupe import process_enrollment
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -90,14 +91,29 @@ def silver_validated(context: AssetExecutionContext) -> None:
         "quarantine_rate": MetadataValue.text(f"{summary['quarantine_rate']:.2%}"),
     })
 
+# AFTER
+@asset(group_name="warehouse", deps=[silver_validated])
+def silver_in_postgres(context: AssetExecutionContext) -> None:
+    """Materializes Silver Parquet into real Postgres silver.* tables via
+    pipeline_writer, using the same TRUNCATE-safe writer Gold uses. This
+    was previously implemented (pipelines/silver/load_silver_to_postgres.py)
+    but never wired into the asset graph -- meaning a full pipeline run
+    left Postgres's `silver` schema permanently empty despite it having
+    full DDL and RBAC grants. Fixed here (Task 29)."""
+    password = os.environ["PIPELINE_WRITER_PASSWORD"]
+    engine = build_pipeline_writer_engine(password)
+    counts = load_silver_to_postgres(engine)
+    context.add_output_metadata({"row_counts": MetadataValue.json(counts)})
+
 
 @asset(group_name="gold", deps=[silver_validated])
 def gold_dimensions(context: AssetExecutionContext) -> None:
-    """dim_college, dim_program, dim_academic_year, dim_semester,
-    dim_calendar, and dim_student (real SCD2 history) (Day 12)."""
+    """dim_academic_period, dim_calendar, dim_year_level, dim_gender,
+    dim_college, dim_program, and dim_student (real SCD2 history)
+    (Day 12; renamed/re-modeled per Task 23/24 -- see
+    pipelines/gold/build_dimensions.py's module docstring)."""
     counts = build_all_dimensions()
     context.add_output_metadata({"row_counts": MetadataValue.json(counts)})
-
 
 @asset(group_name="gold", deps=[gold_dimensions])
 def gold_facts(context: AssetExecutionContext) -> None:

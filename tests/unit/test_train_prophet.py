@@ -17,8 +17,8 @@ import os
 
 import pytest
 
-from models.forecasting.train_prophet import TEST_SEMESTER_KEYS, semester_to_date
 
+from models.forecasting.train_prophet import TEST_PERIOD_ORDINALS, semester_to_date
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
     "POSTGRES_PORT": os.environ.get("TEST_POSTGRES_PORT", "5432"),
@@ -43,7 +43,7 @@ def test_semester_to_date_matches_dim_calendar_convention():
 
 
 def test_exactly_four_walk_forward_test_points():
-    assert TEST_SEMESTER_KEYS == [5, 6, 7, 8]
+    assert TEST_PERIOD_ORDINALS == [5, 6, 7, 8]
 
 
 def _postgres_available() -> bool:
