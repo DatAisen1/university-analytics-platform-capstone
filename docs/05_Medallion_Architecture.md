@@ -4,7 +4,7 @@
 
 - **Bronze**: preserve exactly what was received.
 - **Silver**: make it correct and consistent.
-- **Gold**: make it useful and fast to query.
+- **Gold**: make it useful and fast to query — and the last layer this repo is responsible for.
 
 Conflating these (e.g., cleaning data *while* ingesting it) is the single most common mistake in pipelines that later become impossible to debug — you lose the ability to distinguish "the source sent bad data" from "our cleaning logic has a bug."
 
@@ -19,7 +19,7 @@ Immutable, append-only landing zone. Bronze is a faithful copy of the source, pl
 `bronze_sis_student`, `bronze_sis_enrollment`, `bronze_sis_program`, `bronze_sis_college`, `bronze_sis_graduation`, `bronze_sis_dropout`, `bronze_sis_shifter` — one Bronze table per source entity, mirroring the Faker generator's output files.
 
 ### Storage
-Parquet files in MinIO, partitioned by `academic_year=/semester=/ingested_date=`. Parquet chosen over CSV for Bronze because it preserves types (no re-inferring "was this column a string or an int?") and is far more efficient for the repeated reads Silver processing will do.
+Parquet files in MinIO, partitioned by `academic_year=<label>/semester=<1|2>/ingested_date=`, where `<label>` is the real school-year label (`2021-2022`, `2022-2023`, `2023-2024`) — **not** a bare single year. Parquet chosen over CSV for Bronze because it preserves types and is far more efficient for the repeated reads Silver processing will do.
 
 ### Metadata / Audit Columns (added at ingestion, nothing else changes)
 `_ingested_at`, `_source_file`, `_batch_id`, `_row_hash` (for change detection on reprocessing).
@@ -28,7 +28,7 @@ Parquet files in MinIO, partitioned by `academic_year=/semester=/ingested_date=`
 MinIO bucket versioning enabled — even Bronze writes are never silently destructive. Combined with partitioning by ingestion date, this means "what did Bronze look like on date X" is always answerable.
 
 ### Incremental Loading
-Ingestion job checks `pipeline_run_log` for the last successfully ingested `(academic_year, semester, source_file)` combination and only pulls new/unprocessed files — a new semester's file is a new partition, not a rewrite of history.
+Ingestion job checks `pipeline_run_log` for the last successfully ingested `(academic_year, semester, source_file)` combination and only pulls new/unprocessed files — a new semester's file is a new partition, not a rewrite of history. Across the full scope, that's **6 semester partitions per entity** (3 academic years × 2 semesters), not 8.
 
 ### What Bronze Explicitly Does NOT Do
 - No deduplication
@@ -51,12 +51,14 @@ Turn "what we received" into "what we can trust." This is where data quality is 
 Enforced via `pandera` schemas per entity — e.g., `student_id` non-null and unique, `enrollment_status` in a controlled enum, `birth_year` within a sane range (1980–2010 given traditional-age students).
 
 ### Transformation
-- Map raw status codes/free-text (as they'd realistically appear from a registrar export) to a controlled vocabulary (`ENROLLED`, `GRADUATED`, `DROPPED`, `SHIFTED`, `ON_LEAVE`).
+- Map raw status codes/free-text (as they'd realistically appear from a registrar export) to a controlled vocabulary (`ENROLLED`, `GRADUATED`, `DROPPED`).
 - Standardize college/program names against the `configs/colleges.yaml` and `configs/programs.yaml` reference lists (catches typos/variants like "BS IT" vs "BSIT").
+- Normalize `academic_year` text variants (e.g., a source file that writes `"2022-23"` or `"AY 2022-2023"`) to the canonical `configs/academic_calendar.yaml` label (`2022-2023`) — a new normalization step made necessary specifically by moving to real split-year labels instead of a bare single year.
 
 ### Business Rules (data-correctness rules, not KPI formulas)
 - A student cannot be `GRADUATED` in a semester before their `enrollment_date`.
 - A student cannot have two conflicting statuses in the same semester (e.g., both `DROPPED` and `ENROLLED`).
+- An enrollment record's `(academic_year, semester_number)` must be one of the 6 valid in-scope combinations — anything else (a typo'd or out-of-range academic year) is quarantined, not silently accepted.
 - Rows violating these are **quarantined** (written to `silver_quarantine_<entity>` with the failure reason), not silently dropped — so a data engineer can inspect and decide whether it's a source bug or a real edge case.
 
 ### Data Quality Checks
@@ -71,75 +73,74 @@ Silver tables are still close to source shape (one table per entity) but fully t
 ### Tables
 `silver_student`, `silver_enrollment`, `silver_program`, `silver_college`, `silver_graduation`, `silver_dropout`, `silver_shifter`.
 
-### Implementation Notes — Cleaning (Day 10)
+### Implementation Notes — Cleaning
 
-**Modules:** `pipelines/silver/cleaning_rules.py` (pure functions) + `pipelines/silver/clean_entities.py` (DuckDB SQL orchestration, per `07_Technology_Stack.md`'s "DuckDB SQL for the actual Bronze→Silver→Gold transformations" decision), run via `python -m pipelines.silver.clean_entities`.
+> **⚠️ STALE — pending regeneration.** Prior concrete counts here (e.g., "33,800 rows checked, `ENROLLED` (31,519), `DROPPED` (1,295), `GRADUATED` (986)") were measured against the old 8-semester dataset and are no longer accurate; they must be remeasured after the generator and pipeline are re-run against the 6-semester grain. The design decisions below are unaffected and carry forward.
 
-**One correction to the original design, made honest here rather than silently reconciled:** this section originally said the controlled vocabulary was `ENROLLED, GRADUATED, DROPPED, SHIFTED, ON_LEAVE`. The actual generator (Days 4–6) never produces `SHIFTED` or `ON_LEAVE` as an `enrollment_status` value — a shift is its own event type (`fact_shifter`), and leave-of-absence was never modeled. The real controlled vocabulary Silver normalizes to is `ENROLLED`, `GRADUATED`, `DROPPED` — three values, confirmed against the actual cleaned output.
+**Modules:** `pipelines/silver/cleaning_rules.py` (pure functions) + `pipelines/silver/clean_entities.py` (DuckDB SQL orchestration), run via `python -m pipelines.silver.clean_entities`.
 
-**Global read, not per-partition.** `read_all_bronze()` unions *every* Bronze Parquet file for an entity — across all 8 semester partitions and every ingestion batch — into one DataFrame before cleaning. This is deliberate: Day 11's dedup step needs the full cross-partition picture (a late correction physically lands in a *later* partition's file but describes an *earlier* semester), so Silver has to think of each entity as one logical table, not eight partition-shaped ones, even though Bronze physically stores it that way.
+**The real controlled vocabulary Silver normalizes `enrollment_status` to is `ENROLLED`, `GRADUATED`, `DROPPED`** — three values. A shift is its own event type (`fact_shifter`), and leave-of-absence is not modeled, so `SHIFTED`/`ON_LEAVE` never appear as `enrollment_status` values.
 
-**`normalize_enrollment_status` resolves all 9 of Day 6's real noise variants** (`ENROLLED`, `Enrolled`, `enrolled`, `' ENROLLED '`, `GRADUATED`, `Graduated`, `DROPPED`, `Dropped`, `DROPPED OUT`) down to exactly 3 controlled values — confirmed against the real 33,800-row dataset: `ENROLLED` (31,519), `DROPPED` (1,295), `GRADUATED` (986), zero rows left unmapped. A non-raising variant (`normalize_enrollment_status_safe`) tags anything genuinely unrecognized as `'UNKNOWN:<raw>'` rather than raising — cleaning's job is to normalize what it can and surface what it can't, not to reject rows. Rejection is Day 11's quarantine step, a deliberately separate concern.
+**Global read, not per-partition.** `read_all_bronze()` unions *every* Bronze Parquet file for an entity — across all 6 in-scope semester partitions (previously mis-stated as 8) and every ingestion batch — into one DataFrame before cleaning. This is deliberate: dedup needs the full cross-partition picture (a late correction physically lands in a *later* partition's file but describes an *earlier* semester), so Silver has to think of each entity as one logical table, not partition-shaped ones.
 
-**No typo correction on `home_province`.** Day 6 also injected typo noise there, but unlike `enrollment_status` (a small closed set), free-text place names have no equally-clean closed-form correction without a much larger reference/fuzzy-matching effort — correctly scoped out rather than half-implemented. Only whitespace trimming is applied.
+**No typo correction on `home_province`.** Free-text place names have no equally-clean closed-form correction without a much larger reference/fuzzy-matching effort — correctly scoped out rather than half-implemented. Only whitespace trimming is applied.
 
-**Testing:** `tests/unit/test_cleaning_rules.py` (22 tests — all 9 real noise variants, plus edge cases the real data doesn't happen to contain: `None`, empty string, whitespace-only, and unrecognized values) and `tests/unit/test_clean_entities.py` (6 tests proving the DuckDB orchestration itself — not just the pure functions — including the cross-partition global-read behavior and that unrecognized status values survive as `UNKNOWN:` rather than vanishing).
+**Testing:** `tests/unit/test_cleaning_rules.py` and `tests/unit/test_clean_entities.py` keep their structure and noise-variant coverage; fixture semester labels need updating to the `{academic_year}-{semester_number}` format.
 
-### Implementation Notes — Validation, Quarantine & Dedup (Day 11)
+### Implementation Notes — Validation, Quarantine & Dedup
+
+> **⚠️ STALE — pending regeneration.** Prior concrete counts (33,800 → 32,701 rows, specific quarantine tallies) were measured against the old 8-semester dataset and must be remeasured.
 
 **Module:** `pipelines/silver/validate_and_dedupe.py`, run via `python -m pipelines.silver.validate_and_dedupe`.
 
 **Order matters: dedup runs before business-rule checks, not after.** A late correction's entire point is that the newer version should be trusted — checking a since-superseded earlier version for correctness would be validating the wrong thing. Dedup picks the winner per natural key first (last-write-wins by `_ingested_at`, via a DuckDB `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY _ingested_at DESC)`), and only the survivors go through business-rule checks.
 
-**Dedup result, confirmed against real data — the single most satisfying check in this whole project so far:** 33,800 noisy Bronze-derived rows → 1,099 duplicates dropped (298 in-partition duplicates + 801 late corrections, exactly matching Day 6's injected counts) → **32,701 final rows, an exact match to Day 5's pre-noise ground truth.** The round trip — clean generation → intentional noise injection → Bronze → Silver dedup — reconstructs the original count exactly. Zero duplicate natural keys remain in the final table (verified directly, not assumed).
-
-**Three business rules, quarantine-not-reject:**
-1. `check_known_status` — rejects any row Day 10 tagged `'UNKNOWN:...'` (closes the loop between the two days' deliberately separated concerns).
-2. `check_semester_within_cohort_range` — a cross-entity check against Silver's `student` table: an enrollment record's `(academic_year, semester_number)` must fall within the student's valid observed window (not before cohort entry, not after 2024-2).
+**Four business rules, quarantine-not-reject** (a new one added for the academic-calendar correction):
+1. `check_known_status` — rejects any row tagged `'UNKNOWN:...'` by the cleaning stage.
+2. `check_semester_within_cohort_range` — a cross-entity check against Silver's `student` table: an enrollment record's `(academic_year, semester_number)` must fall within the student's valid observed window.
 3. `check_dropout_consistency` — a cross-entity check against `dropout`: a `DROPPED` enrollment row must have a matching dropout event, and vice versa.
+4. `check_academic_year_in_scope` (new) — an enrollment record's `academic_year` must be one of `2021-2022`, `2022-2023`, `2023-2024` per `configs/academic_calendar.yaml`; anything else is quarantined rather than silently coerced. This rule specifically exists because the academic-year label format changed from a single year to a school-year string, which is exactly the kind of change that should be enforced at the validation boundary, not assumed to have propagated everywhere correctly.
 
-**Honest result on the real dataset: 0% quarantine rate, and that's the correct outcome, not a weak test.** Because the synthetic generator (Days 4–6) constructs enrollment/dropout/graduation records together and correctly by design, none of the three business rules should ever find a real violation — that's confirmation the earlier stages were built correctly, not evidence the checks are decorative. Their value is proven a different way: **14 tests with deliberately injected bad rows** (a record dated before its student's cohort entry, a `DROPPED` status with no matching dropout event, a still-`UNKNOWN` status) confirm each rule actually quarantines what it claims to, with the reason recorded in `_quarantine_reason` — the quarantine mechanism is proven by construction of bad input, not by hoping the real data eventually breaks something.
-
-**Testing:** `tests/unit/test_validate_and_dedupe.py` — 14 tests: dedup correctness (exact duplicates, late-correction winner selection, distinct-key preservation), each business rule in isolation with an injected violation, and a full `process_enrollment` integration test against a fixture containing one of every problem type at once, confirming the final counts (`rows_in=6 → duplicates_dropped=1, quarantined=3, rows_out=2`) add up exactly.
+**Testing:** `tests/unit/test_validate_and_dedupe.py` keeps its structure (dedup correctness, each business rule tested in isolation with an injected violation, a full integration test); add one new test for rule 4 above, and update all fixture counts once the pipeline is re-run.
 
 ---
 
 ## 4. Gold Layer
 
 ### Purpose
-Business-ready, dimensionally modeled, aggregated, and ML-ready. Everything downstream (dashboards, ML, ad-hoc analytics) reads only from here.
+Business-ready, dimensionally modeled, aggregated, and ML-ready. This is the **last layer this repo owns** — everything downstream (Web Team, ML feature consumers, ad-hoc analytics) reads only from here, and only via `gold`/`marts`.
 
 ### Business-Ready Datasets
-The full star schema from `04_Data_Modeling.md`: `dim_student`, `dim_program`, `dim_college`, `dim_semester`, `dim_academic_year`, `dim_calendar`, and all `fact_*` tables.
+The full star schema from `04_Data_Modeling.md`: `dim_student`, `dim_program`, `dim_college`, `dim_semester`, `dim_academic_year`, `dim_year_level`, `dim_calendar`, and all `fact_*` tables.
 
 ### Aggregations
-`fact_institution_kpi` is a pre-aggregated fact — computed once per Gold run, not recomputed ad hoc by every dashboard query. This guarantees the dashboard, dbt marts, and any analyst querying directly all see the *same* success rate number, because it's computed in exactly one place.
+`fact_institution_kpi` is a pre-aggregated fact — computed once per Gold run, not recomputed ad hoc by every consumer's query. This guarantees the Web Team's dashboard, dbt marts, and any analyst querying directly all see the *same* success rate number, because it's computed in exactly one place.
 
 ### ML Datasets
-A dedicated Gold table, `ml_forecast_features` (see `10_Forecasting.md` for feature detail), built as a time-series-shaped table: one row per `(college/program, semester)` with lag features, rolling averages, and the target variable — decoupled from the dashboard-facing star schema so ML feature engineering can evolve independently.
+A dedicated Gold table, `ml_forecast_features` (see `10_Forecasting.md` for feature detail), built as a time-series-shaped table: one row per `(college/program, semester)` with lag features, rolling averages, and the target variable — decoupled from the consumption-facing star schema so ML feature engineering can evolve independently.
 
-### Dashboard Datasets
-Gold facts are queried directly by dbt marts (`mart_executive_summary`, `mart_college_performance`, etc. — see `11_Dashboard.md`), which the dashboard tool queries. The dashboard itself never touches Silver or Bronze.
+### Consumption Datasets (formerly "Dashboard Datasets")
+Gold facts are queried directly by dbt marts (`mart_executive_summary`, `mart_college_performance`, etc. — see `11_Data_Consumption_Contract.md`), which the **Web Team's** service queries via the read-only `web_service_reader` role. This repo never builds or operates the presentation layer itself; it publishes the marts and stops there.
 
 ### KPI Tables
-`fact_institution_kpi` (per college/semester) plus a rolled-up `fact_institution_kpi_overall` (per semester, campus-wide) for the Executive dashboard's top-line number.
+`fact_institution_kpi` (per college/semester) plus a rolled-up `fact_institution_kpi_overall` (per semester, campus-wide) for the top-line institutional number, however the Web Team chooses to display it.
 
 ### Decision-Support Tables
 `mart_retention_risk` — a dbt mart flagging programs whose retention rate has declined for 2+ consecutive semesters, directly supporting the "where should we intervene" administrative decision.
 
 ---
 
-## 4.1 Gold Implementation Summary (Days 12–14)
+## 4.1 Gold Implementation Summary
 
-All of Section 4's abstract Gold design is now real, built, and tested end-to-end against the actual 7,800-student dataset:
+> **⚠️ STALE — pending regeneration.** The prior version of this table reported real results (8,012 `dim_student` rows for 7,800 students, 64-row `fact_institution_kpi`) from a run against the old 8-semester model. Expected shapes under the corrected 6-semester model:
 
-| Deliverable | Module | Real result |
+| Deliverable | Module | Expected shape (6-semester model) |
 |---|---|---|
-| Dimensions (incl. `dim_student` SCD2) | `pipelines/gold/build_dimensions.py` | 8,012 `dim_student` rows for 7,800 students; a real SCD2 bug (entry-semester shifts) found and fixed — see `04_Data_Modeling.md` §9 |
-| Fact tables | `pipelines/gold/build_facts.py` | All 5 facts reconcile exactly to Silver source counts; AS-OF join against SCD2 proven time-aware, not just student-aware — see `04_Data_Modeling.md` §10 |
-| `fact_institution_kpi` (Success Rate) | `pipelines/gold/build_kpi.py` | 64 rows (8 colleges × 8 semesters); formula matches `09_Data_Science.md`'s worked example exactly; a real bug (missing `college_key` on shift events) found and fixed — see `09_Data_Science.md` §7 |
+| Dimensions (incl. `dim_student` SCD2) | `pipelines/gold/build_dimensions.py` | One current row per student, plus one additional row per shifter — exact totals depend on regenerated data |
+| Fact tables | `pipelines/gold/build_facts.py` | Row counts must reconcile exactly to Silver source counts (unchanged requirement) |
+| `fact_institution_kpi` (Success Rate) | `pipelines/gold/build_kpi.py` | **8 colleges × 6 semesters = 48 rows** (was 64 under the incorrect model) |
 
-Every one of these ran against a genuine constraint worth restating here: Postgres isn't running in this environment (no Docker daemon — Day 2's note). Gold lands as Parquet in `warehouse/gold_store/` via the same `ObjectStorage` abstraction used for Bronze and Silver. Materializing into the real Postgres warehouse is Week 3's job (Day 15 onward); the transformation logic itself doesn't change, only the write target.
+Every one of these runs against a genuine, unrelated constraint: Postgres isn't running in this environment (no Docker daemon). Gold lands as Parquet in `warehouse/gold_store/` via the same `ObjectStorage` abstraction used for Bronze and Silver. Materializing into the real Postgres warehouse only changes the write target, not the transformation logic.
 
 ## 5. Layer Promotion Rule (Summary Table)
 
@@ -148,7 +149,7 @@ Every one of these ran against a genuine constraint worth restating here: Postgr
 | Source → Bronze | File exists, non-empty, expected columns present | Alert, do not ingest |
 | Bronze → Silver | Schema validation (pandera) | Quarantine row, continue batch |
 | Silver → Gold | Data quality suite pass rate ≥ threshold | Hold entire batch, alert, do not promote |
-| Gold → Warehouse/dbt | dbt tests (`not_null`, `unique`, `relationships`) | Fail dbt run, block dashboard refresh |
+| Gold → Warehouse/dbt marts | dbt tests (`not_null`, `unique`, `relationships`) | Fail dbt run, block marts publication (and therefore block the Web Team's read) |
 
 This "gate at every boundary" pattern is what makes the phrase "the data is trustworthy" actually verifiable rather than aspirational.
 

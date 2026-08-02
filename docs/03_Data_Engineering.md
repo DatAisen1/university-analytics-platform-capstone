@@ -6,9 +6,10 @@ This document defines the engineering discipline layer: how code is organized, h
 
 ```
 university-analytics-platform/
-├── configs/                  # YAML config: colleges, programs, business rules, env-specific settings
+├── configs/                  # YAML config: colleges, programs, academic calendar, business rules, env-specific settings
 │   ├── colleges.yaml
 │   ├── programs.yaml
+│   ├── academic_calendar.yaml # academic years 2021-2022 / 2022-2023 / 2023-2024, 2 semesters each
 │   ├── business_rules.yaml
 │   └── environments/
 │       ├── dev.yaml
@@ -30,14 +31,13 @@ university-analytics-platform/
 │   ├── models/
 │   │   ├── staging/
 │   │   ├── intermediate/
-│   │   └── marts/
+│   │   └── marts/             # the published Web Team consumption contract lives here
 │   ├── tests/
 │   └── dbt_project.yml
 ├── analytics/                # ad-hoc SQL, exploratory notebooks output
 ├── models/                   # ML model code (feature engineering, training)
 │   └── forecasting/
 ├── forecasting/               # forecast job entrypoints, artifacts
-├── dashboard/                 # Superset/Streamlit assets
 ├── notebooks/                  # exploration only — never production logic
 ├── scripts/                   # one-off / operational scripts (backfill, seed, etc.)
 ├── tests/
@@ -52,7 +52,9 @@ university-analytics-platform/
 └── README.md
 ```
 
-**Why this shape:** it mirrors the medallion architecture directly in folder names (`bronze/`, `silver/`, `gold/`), so anyone opening the repo immediately understands where in the lifecycle any given piece of code operates. `configs/` is separated from `pipelines/` deliberately — business facts (which colleges exist, what counts as a dropout) should never be hardcoded inside transformation logic, because that couples "what the rule is" to "how the rule is applied," making both harder to change independently.
+**Note on scope:** there is deliberately no `dashboard/` folder here. Dashboard/UI code belongs to the Web Team's own repository; this repo's contract with them ends at `dbt/models/marts/` plus the read-only `web_service_reader` database role (see `06_Data_Warehouse.md`).
+
+**Why this shape:** it mirrors the medallion architecture directly in folder names (`bronze/`, `silver/`, `gold/`), so anyone opening the repo immediately understands where in the lifecycle any given piece of code operates. `configs/` is separated from `pipelines/` deliberately — business facts (which colleges exist, what counts as a dropout, which academic years/semesters exist) should never be hardcoded inside transformation logic, because that couples "what the rule is" to "how the rule is applied," making both harder to change independently. `academic_calendar.yaml` exists for the same reason config exists for colleges/programs: the 2021-2022/2022-2023/2023-2024 academic-year definition is a business fact, not logic, and should never be re-typed as a magic literal in pipeline code.
 
 ## 2. Naming Conventions
 
@@ -66,15 +68,16 @@ university-analytics-platform/
 | dbt marts | `mart_<domain>` | `mart_institution_kpi` |
 | Python modules | `snake_case.py` | `bronze_to_silver.py` |
 | Config keys | `snake_case` | `dropout_threshold_days` |
+| Semester identifier | `<academic_year>-<semester_number>` | `2022-2023-1` (2022-2023 academic year, 1st Semester) |
 | Audit columns | `_ingested_at`, `_source_file`, `_batch_id`, `_is_current`, `_valid_from`, `_valid_to` | — |
 
-Consistent naming is a form of documentation — a new engineer should be able to guess which layer a table belongs to from its name alone, without opening it.
+Consistent naming is a form of documentation — a new engineer should be able to guess which layer a table belongs to from its name alone, without opening it. The semester-identifier convention matters specifically because the academic calendar migrated from single-year labels (`2021-1`) to NEUST's real split-year labels (`2021-2022-1`) — see `01_Project_Overview.md` §4 for why this isn't cosmetic.
 
 ## 3. Coding Standards
 
 - **Python**: PEP 8, type hints on all function signatures, docstrings (Google style) on all public functions.
 - **SQL**: lowercase keywords are avoided — use UPPERCASE for SQL keywords, snake_case for identifiers, CTEs preferred over nested subqueries for readability, one statement per file per dbt model.
-- **No hardcoded literals** — thresholds, college lists, and business rules come from `configs/`.
+- **No hardcoded literals** — thresholds, college lists, academic years, and business rules come from `configs/`.
 - **Every pipeline stage is a pure function where possible**: `def transform(df: pd.DataFrame, config: dict) -> pd.DataFrame`, with I/O (reading/writing files) kept at the edges. This is what makes stages unit-testable without spinning up a database.
 
 ## 4. Configuration Management & Environment Variables
@@ -85,11 +88,12 @@ Consistent naming is a form of documentation — a new engineer should be able t
 
 ### 4.1 Reference Data as Config — Implementation (Day 3)
 
-Colleges and programs are the clearest case of "this must be config, not code" in the whole project: they're pure business facts (what exists), not logic (what to do), and they change on an administrative timescale (a new program added, a college renamed) that shouldn't require a code deploy.
+Colleges and programs are the clearest case of "this must be config, not code" in the whole project: they're pure business facts (what exists), not logic (what to do), and they change on an administrative timescale (a new program added, a college renamed) that shouldn't require a code deploy. `academic_calendar.yaml` (2021-2022/2022-2023/2023-2024, 2 semesters each) belongs in the same category and is loaded through the same validation pattern.
 
 **Files:**
 - `configs/colleges.yaml` — 8 colleges, keyed by a stable `college_id` natural key.
 - `configs/programs.yaml` — 37 programs, each pointing at its owning college via `college_id`, carrying `program_level` and `nominal_duration_years` (the latter feeds graduation-eligibility logic in the Faker progression engine, Day 5, and later in Gold's graduation-rate calculation — defined once, here, not recomputed or re-guessed downstream).
+- `configs/academic_calendar.yaml` — the 3 academic years and 2 semesters each, plus the `year_level` domain (`Freshman, Sophomore, Junior, Senior, Super Senior`) used across the generator and Gold layer.
 
 **Loader:** `pipelines/common/config.py`, built around a deliberate two-stage validation split:
 
@@ -139,7 +143,7 @@ Schema validation asks "*is this shaped correctly?*"; data quality asks "*does t
 
 - Pipeline code is versioned via Git tags aligned to warehouse schema versions (e.g., pipeline `v1.2.0` ↔ warehouse migration `003_add_shifter_fact.sql`).
 - **Idempotency rule**: every load is keyed by `(batch_id or semester_id, entity)` and uses `MERGE`/`UPSERT` semantics (or Bronze partition overwrite-by-partition), so re-running the same batch produces the same end state — never duplicate rows.
-- Practically: Bronze partitions by `academic_year/semester/source_file`, and Silver/Gold use `MERGE INTO ... ON (natural_key) WHEN MATCHED ... WHEN NOT MATCHED ...`.
+- Practically: Bronze partitions by `academic_year/semester_number/source_file` (e.g., `academic_year=2022-2023/semester=1/`), and Silver/Gold use `MERGE INTO ... ON (natural_key) WHEN MATCHED ... WHEN NOT MATCHED ...`.
 
 ## 10. Incremental Loads
 
@@ -162,35 +166,37 @@ Schema validation asks "*is this shaped correctly?*"; data quality asks "*does t
 | dbt marts | `not_null`, `unique`, `relationships` tests | dbt native tests |
 | End-to-end | Integration test on small fixture dataset | `pytest` + Docker test DB |
 
-## 13. Bronze Ingestion — Implementation (Day 8)
+## 13. Bronze Ingestion — Implementation Notes
 
-**A real, sandbox-honest constraint:** MinIO and Postgres run in Docker (Day 2), and this development environment has no Docker daemon. Rather than fake this or skip it, the ingestion code is written against an interface (`ObjectStorage` in `pipelines/common/storage.py`), with two implementations:
+> **⚠️ STALE — pending regeneration.** The implementation notes previously here (Day 8) reported real numbers (34 files ingested, 1 reference + 1 student master + partition-file counts) measured against the **old, incorrect 8-semester academic-year model**. That model has been replaced (see `01_Project_Overview.md` §4). The design and interface below remain valid; the concrete file/row counts do not, and must be re-measured once the generator and pipeline are re-run against the corrected 6-semester grain (2021-2022, 2022-2023, 2023-2024 × 2 semesters).
+
+**A real, sandbox-honest constraint, unaffected by the academic-year fix:** MinIO and Postgres run in Docker, and this development environment has no Docker daemon. Rather than fake this or skip it, the ingestion code is written against an interface (`ObjectStorage` in `pipelines/common/storage.py`), with two implementations:
 - `LocalFileStorage` — filesystem-backed, used for actual development/testing here.
-- `S3Storage` — real `boto3`-backed, MinIO/S3-API-compatible, tested against a **mocked** S3 backend (`moto`) rather than a live container. This proves the boto3 call logic is correct; a live MinIO smoke test is still something to run on your own machine once `docker compose up` works there.
+- `S3Storage` — real `boto3`-backed, MinIO/S3-API-compatible, tested against a **mocked** S3 backend (`moto`) rather than a live container.
 
 Swapping backends is a one-line change at the call site (`ingest_all(storage=...)`) — ingestion logic itself never references a specific backend, which is the entire point of depending on the interface.
 
-**Modules:** `pipelines/common/storage.py` (the interface + both backends), `pipelines/common/metadata.py` (the `pipeline_run_log` store, backed by DuckDB — a real, file-based, queryable database that needs no server, so it works identically here and once Postgres is live), `pipelines/ingestion/ingest_to_bronze.py` (the ingestion job), run via `python -m pipelines.ingestion.ingest_to_bronze`.
+**Modules:** `pipelines/common/storage.py` (the interface + both backends), `pipelines/common/metadata.py` (the `pipeline_run_log` store, backed by DuckDB), `pipelines/ingestion/ingest_to_bronze.py` (the ingestion job), run via `python -m pipelines.ingestion.ingest_to_bronze`.
 
 **What this stage does and doesn't do**, per `05_Medallion_Architecture.md`: file-level checks only (source exists, non-empty, expected columns present — `IngestionError` if not), audit-column stamping (`_ingested_at`, `_source_file`, `_batch_id`), and idempotent landing as Parquet. No per-field schema validation (Day 9) and no business-rule correctness (Day 11) happen here.
 
-**Idempotency, proven, not assumed:** re-running `ingest_all()` without `force=True` checks `pipeline_run_log` for an existing `SUCCESS` row per `(entity, partition_key)` and skips it. Confirmed against the real dataset: first run wrote 34 files (2 reference + 1 student master + 31 semester-scoped entity files — one partition, 2021-1, correctly has no `graduation.csv` since no 1-year cert program can graduate in its very first observed semester); a second run produced **zero** new files, identical file set before and after. `force=True` intentionally bypasses this and appends a *new* batch-tagged file (Bronze never overwrites) — verified as a distinct, deliberate escape hatch for backfills, not an idempotency bug.
+**Idempotency, proven by design, re-confirmation pending against the corrected data:** re-running `ingest_all()` without `force=True` checks `pipeline_run_log` for an existing `SUCCESS` row per `(entity, partition_key)` and skips it; `force=True` intentionally bypasses this and appends a *new* batch-tagged file (Bronze never overwrites). The mechanism itself doesn't depend on which academic-year model is in use and needs no redesign — only re-verification against the 6-semester dataset once it exists.
 
-**Deferred, flagged explicitly (not silently skipped):** a full `pydantic-settings` `Settings` object for environment variables was flagged as a gap back in Day 3's review and is still not built. `load_minio_storage_from_env()` in `storage.py` is a narrowly-scoped helper for exactly the MinIO-connection-params need, not a substitute for that broader piece — still on the list.
+**Deferred, flagged explicitly (not silently skipped):** a full `pydantic-settings` `Settings` object for environment variables was flagged as a gap and is still not built. `load_minio_storage_from_env()` in `storage.py` is a narrowly-scoped helper for exactly the MinIO-connection-params need, not a substitute for that broader piece — still on the list.
 
-**Testing:** `tests/unit/test_storage.py` (12 tests, parametrized across both `LocalFileStorage` and mocked `S3Storage` against the *same* behavioral contract — proving they're actually interchangeable, not just individually functional), `tests/unit/test_metadata.py` (6 tests on the idempotency check), `tests/unit/test_ingest_to_bronze.py` (8 tests against a small fixture population, covering the missing-entity-file path, audit-column presence, idempotent re-run, forced reprocessing, and file-level validation failures).
+**Testing:** `tests/unit/test_storage.py`, `tests/unit/test_metadata.py`, `tests/unit/test_ingest_to_bronze.py` — all pass independently of the academic-year definition and do not need rewriting; only the fixture partition labels used inside them should be updated to the new `academic_year-semester_number` format when the migration lands.
 
-## 14. Bronze Schema Validation — Implementation (Day 9)
+## 14. Bronze Schema Validation — Implementation Notes
 
 **Module:** `pipelines/common/schemas.py` — one `pandera` `DataFrameSchema` per Bronze entity (college, program, student, enrollment, graduation, dropout, shifter), wired into `ingest_to_bronze.py`'s `ingest_one()` as a post-write step (`_run_schema_validation`), logged to `pipeline_run_log` under a distinct stage (`bronze_schema_validation`) separate from ingestion itself.
 
-**The design decision that actually matters here:** schema validation checks *shape* (right columns, right types, sane ranges), never *business vocabulary*. The clearest proof this was applied correctly, not just stated: `enrollment_status` has no `isin([...])` constraint, so all 9 of Day 6's intentionally noisy text variants (`' ENROLLED '`, `Enrolled`, `DROPPED OUT`, etc.) pass validation — confirmed by a parametrized test running every variant through the schema. Restricting that field to a controlled vocabulary at Bronze would have rejected the very realism Day 6 built on purpose; that normalization is Silver's job (Day 10), not Bronze's.
+**The design decision that actually matters here:** schema validation checks *shape* (right columns, right types, sane ranges), never *business vocabulary*. `enrollment_status` has no `isin([...])` constraint, so realistic noisy text variants (`' ENROLLED '`, `Enrolled`, `DROPPED OUT`, etc.) pass validation on purpose — restricting that field to a controlled vocabulary at Bronze would reject the very realism the noise-injection stage exists to create. That normalization is Silver's job, not Bronze's. This design decision is independent of the academic-year model and does not need to change.
 
-**Non-blocking by design.** A schema violation is *logged*, not used to reject the Bronze write — Bronze's entire purpose is preserving exactly what was received, even if malformed, so later root-causing is possible. Verified directly: a deliberately invalid row (`birth_year: 1850`) still landed in Bronze (`storage.exists(result["key"])` is `True`) while the validation report correctly logged `FAILED` with `birth_year` named in the error message. A quality gate that actually *blocks* promotion belongs at the Silver boundary (Day 11), not here.
+**Non-blocking by design.** A schema violation is *logged*, not used to reject the Bronze write — Bronze's entire purpose is preserving exactly what was received, even if malformed, so later root-causing is possible.
 
-**Confirmed against real data:** all 34 successfully-ingested Bronze partitions from the real 7,800-student dataset pass schema validation cleanly — zero violations on real (noisy-but-valid) data, and a hand-crafted malformed row (null `program_id`, invalid `program_level`, out-of-range `nominal_duration_years`) is caught with all three violations reported together in one pass (`lazy=True`), not just the first.
+> **⚠️ STALE — pending regeneration.** The specific pass/fail counts previously reported here (e.g., "all 34 partitions pass cleanly") were measured against the old 8-semester dataset and must be re-measured against the 6-semester dataset.
 
-**Testing:** `tests/unit/test_schemas.py` — 27 tests: one valid-row pass per entity, one deliberately malformed variant per entity (null keys, invalid enums, out-of-range values, duplicate natural keys), a multi-violation collection check, and the noise-tolerance parametrized test across all 9 status variants. Plus 2 new tests in `test_ingest_to_bronze.py` confirming the wiring itself (not just the schemas in isolation) — that `ingest_one` actually calls validation, logs the result, and never lets a schema failure block the Bronze write.
+**Testing:** `tests/unit/test_schemas.py` — the test structure (one valid-row pass per entity, one malformed variant per entity, a multi-violation collection check, the noise-tolerance parametrized test) does not change; only fixture semester labels need updating.
 
 ---
 *Next: `04_Data_Modeling.md` — the dimensional model in full.*

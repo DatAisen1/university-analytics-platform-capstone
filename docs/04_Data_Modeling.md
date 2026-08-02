@@ -13,6 +13,10 @@ erDiagram
     SEMESTER }o--|| ACADEMIC_YEAR : "part of"
 ```
 
+**Academic period grain (authoritative — see `01_Project_Overview.md` §4):** 3 academic years (`2021-2022`, `2022-2023`, `2023-2024`), each with a 1st and 2nd Semester → **6 academic semesters** in scope. `academic_year` is a school-year label, not a single calendar year — this is a deliberate correction from an earlier draft that modeled 4 single-year labels (8 semester-periods); see the migration note in `01_Project_Overview.md`.
+
+**Year-level domain (explicit, not freshman-only):** `Freshman, Sophomore, Junior, Senior, Super Senior`, with `Graduate` as the terminal state. Every fact and aggregate in this document is designed to be sliceable by `year_level`, not just by entering cohort — otherwise the warehouse can answer "how many freshmen enrolled" but not "how many seniors were enrolled in College X during 2022-2023, 2nd Semester," which is exactly the kind of question this platform exists to answer.
+
 ## 2. Why Dimensional Modeling (Star Schema) Over a Normalized OLTP Model
 
 The source-of-truth registrar system (real or simulated) is OLTP-shaped — normalized, optimized for transactional writes. The warehouse's job is the opposite: fast, intuitive **analytical reads** — "success rate by college by year" style queries. Kimball's dimensional modeling approach (facts + dimensions) is the industry-standard answer to this because:
@@ -30,7 +34,7 @@ The source-of-truth registrar system (real or simulated) is OLTP-shaped — norm
 | Storage | Slightly more redundant | More storage-efficient |
 | Best for | BI/dashboard-heavy workloads | Very large, slowly-changing dimension hierarchies with strict normalization needs |
 
-**Recommendation: Star Schema.** The dimension hierarchies here (college → program, calendar → semester → academic year) are shallow and don't change structure often. Snowflaking would only add join complexity for no real storage or integrity benefit at this data volume (tens of thousands of rows, not billions). This is a case where following "best practice" blindly (snowflake = "more normalized = better") would be the wrong call — the right model choice depends on data shape and query pattern, not on which one sounds more sophisticated.
+**Recommendation: Star Schema.** The dimension hierarchies here (college → program, calendar → semester → academic year) are shallow and don't change structure often. Snowflaking would only add join complexity for no real storage or integrity benefit at this data volume (tens of thousands of rows, not billions). This is a case where following "best practice" blindly (snowflake = "more normalized = better") would be the wrong call — the right model choice depends on data shape and query pattern, not on which one sounds more sophisticated. This choice is unaffected by the academic-year model correction.
 
 ## 3. Logical Model — Dimensions
 
@@ -45,7 +49,7 @@ The source-of-truth registrar system (real or simulated) is OLTP-shaped — norm
 | `admission_type` | VARCHAR | Freshman / Transferee |
 | `_valid_from`, `_valid_to`, `_is_current` | DATE/BOOLEAN | **SCD Type 2** |
 
-**Why SCD Type 2 for `dim_student`:** a student's program can change (shifter!) and this change is exactly what the business wants to analyze historically — "how many students shifted out of BSIT in 2023?" requires knowing what a student's dimension attributes *were* at the time of each fact event, not just their current state. Overwriting (SCD Type 1) would silently corrupt historical shifter/retention analysis.
+**Why SCD Type 2 for `dim_student`:** a student's program can change (shifter!) and this change is exactly what the business wants to analyze historically — "how many students shifted out of BSIT in 2023-2024?" requires knowing what a student's dimension attributes *were* at the time of each fact event, not just their current state. Overwriting (SCD Type 1) would silently corrupt historical shifter/retention analysis.
 
 ### `dim_program`
 `program_key` (surrogate), `program_id` (natural), `program_name`, `program_level` (Bachelor/Certificate/Diploma), `college_key` (FK) — SCD Type 1 (program names rarely change, and when they do, we don't need historical versions of the *name*, just the current one, since program identity is tracked by `program_id`).
@@ -54,10 +58,13 @@ The source-of-truth registrar system (real or simulated) is OLTP-shaped — norm
 `college_key`, `college_id`, `college_name` — SCD Type 1.
 
 ### `dim_semester`
-`semester_key`, `semester_id`, `semester_number` (1 or 2), `academic_year_key` (FK), `start_date`, `end_date` — this is a **degenerate-adjacent** dimension: small, static, rebuilt in full each time (Type 1, effectively a lookup).
+`semester_key`, `semester_id` (`{academic_year}-{semester_number}`, e.g. `2022-2023-1`), `semester_number` (1 or 2), `academic_year_key` (FK) — a **degenerate-adjacent** dimension: small (6 rows total across the 3 in-scope academic years), static, rebuilt in full each time (Type 1, effectively a lookup).
 
 ### `dim_academic_year`
-`academic_year_key`, `year_label` (e.g. "2023-2024"), `start_year`, `end_year`.
+`academic_year_key`, `year_label` (`2021-2022`, `2022-2023`, or `2023-2024` — the actual NEUST school-year label, never a bare single year), `start_calendar_year`, `end_calendar_year` (e.g. 2022 / 2023 for `year_label='2022-2023'`).
+
+### `dim_year_level`
+`year_level_key`, `year_level_name` (`Freshman`, `Sophomore`, `Junior`, `Senior`, `Super Senior`), `year_level_rank` (1–5, for ordering in charts/reports without relying on string sort). Added explicitly so year-level analytics are a first-class, independently queryable dimension rather than an unenumerated free-text column — this is the direct fix for the "freshman-only" framing an earlier draft of this project was criticized for.
 
 ### `dim_calendar` (Date Dimension)
 Standard date dimension: `date_key`, `full_date`, `year`, `quarter`, `month`, `day`, `is_semester_start`, `is_semester_end`, `academic_year_key`. Included because forecasting and trend analysis need standard time-grain rollups (month/quarter) that `dim_semester` alone can't provide.
@@ -70,22 +77,22 @@ Combines low-cardinality boolean/categorical flags that don't deserve their own 
 All fact tables share these **audit/lineage columns**: `_batch_id`, `_loaded_at`, `_source_silver_table`.
 
 ### `fact_enrollment` — grain: one row per student per semester
-`student_key`, `program_key`, `college_key`, `semester_key`, `academic_year_key`, `enrollment_status` (enrolled/on-leave), `year_level`, `units_enrolled`, `is_new_enrollee` (measure/flag).
+`student_key`, `program_key`, `college_key`, `semester_key`, `academic_year_key`, `year_level_key`, `enrollment_status` (enrolled/on-leave), `units_enrolled`, `is_new_enrollee` (measure/flag).
 
 ### `fact_graduation` — grain: one row per student per graduation event
 `student_key`, `program_key`, `college_key`, `semester_key`, `graduation_date_key`, `years_to_complete` (measure).
 
 ### `fact_dropout` — grain: one row per student per dropout event
-`student_key`, `program_key`, `college_key`, `semester_key`, `dropout_reason` (degenerate dimension), `semesters_completed_before_dropout`.
+`student_key`, `program_key`, `college_key`, `semester_key`, `year_level_key`, `dropout_reason` (degenerate dimension), `semesters_completed_before_dropout`.
 
 ### `fact_shifter` — grain: one row per shift event
 `student_key`, `from_program_key`, `to_program_key`, `semester_key`, `shift_reason`.
 
 ### `fact_retention` — grain: one row per student per cohort-semester pair
-`student_key`, `cohort_academic_year_key`, `program_key`, `semester_key`, `is_retained` (measure, boolean-as-int for SUM aggregation).
+`student_key`, `cohort_academic_year_key`, `program_key`, `semester_key`, `year_level_key`, `is_retained` (measure, boolean-as-int for SUM aggregation).
 
 ### `fact_institution_kpi` — grain: one row per college per semester (pre-aggregated Gold KPI table)
-`college_key`, `semester_key`, `academic_year_key`, `enrollment_count`, `graduation_count`, `dropout_count`, `shifter_count`, `retention_rate`, `graduation_rate`, `dropout_rate`, `success_rate` (see `09_Data_Science.md`).
+`college_key`, `semester_key`, `academic_year_key`, `enrollment_count`, `graduation_count`, `dropout_count`, `shifter_count`, `retention_rate`, `graduation_rate`, `dropout_rate`, `success_rate` (see `09_Data_Science.md`). **Expected row count: 8 colleges × 6 semesters = 48 rows** — down from the previous (incorrect) 64-row estimate that assumed an 8-semester model.
 
 ### `fact_forecast` — grain: one row per (metric, program/college, forecasted semester, model_version)
 `entity_key` (program or college), `metric_name` (enrollment/graduates/population), `target_semester_key`, `forecast_value`, `lower_bound`, `upper_bound`, `model_version`, `generated_at`.
@@ -95,14 +102,14 @@ All fact tables share these **audit/lineage columns**: `_batch_id`, `_loaded_at`
 | Key type | Used for | Why |
 |---|---|---|
 | **Surrogate keys** (auto-increment INT) | All dimension PKs, referenced by all facts | Insulates the warehouse from source-system ID changes/reuse; required for SCD Type 2 (same natural key, multiple surrogate rows over time) |
-| **Natural keys** (`student_id`, `program_id`) | Stored *inside* dimensions as attributes | Needed to match incoming Silver records to the correct dimension row during `MERGE` |
+| **Natural keys** (`student_id`, `program_id`, `semester_id`) | Stored *inside* dimensions as attributes | Needed to match incoming Silver records to the correct dimension row during `MERGE` |
 | **Foreign keys** | Every fact → dimension relationship | Enforces referential integrity; also documents the model's grain implicitly |
 
 Surrogate keys are non-negotiable here specifically *because* of SCD Type 2 on `dim_student` — the natural key `student_id` will map to multiple surrogate rows over time, and facts must point to the surrogate key that was current *at the time of the fact event*, not the current one.
 
 ## 6. Bridge Tables
 
-Not required in the current scope — there's no natural many-to-many relationship in this model that isn't already resolved by a fact table (e.g., a student changing programs is fully captured by `fact_shifter` + `dim_student` SCD2, not a bridge). Noted here explicitly so the decision reads as deliberate, not an oversight: a bridge table would become necessary if, e.g., students could be enrolled in multiple concurrent programs (dual-degree), which the source data does not model.
+Not required in the current scope — there's no natural many-to-many relationship in this model that isn't already resolved by a fact table (e.g., a student changing programs is fully captured by `fact_shifter` + `dim_student` SCD2, not a bridge). Noted here explicitly so the decision reads as deliberate, not an oversight.
 
 ## 7. Full Star Schema Diagram
 
@@ -112,11 +119,14 @@ erDiagram
     fact_enrollment }o--|| dim_program : program_key
     fact_enrollment }o--|| dim_college : college_key
     fact_enrollment }o--|| dim_semester : semester_key
+    fact_enrollment }o--|| dim_year_level : year_level_key
     fact_graduation }o--|| dim_student : student_key
     fact_graduation }o--|| dim_program : program_key
     fact_dropout }o--|| dim_student : student_key
+    fact_dropout }o--|| dim_year_level : year_level_key
     fact_shifter }o--|| dim_student : student_key
     fact_retention }o--|| dim_student : student_key
+    fact_retention }o--|| dim_year_level : year_level_key
     fact_institution_kpi }o--|| dim_college : college_key
     fact_institution_kpi }o--|| dim_semester : semester_key
     fact_forecast }o--|| dim_semester : target_semester_key
@@ -127,40 +137,23 @@ erDiagram
 ## 8. Physical Model Notes
 
 - All fact tables are partitioned (logically, via `academic_year_key`) to support incremental Gold rebuilds without full-table rewrites.
-- Indexes: B-tree on every FK column in fact tables; composite index on `(college_key, semester_key)` on `fact_institution_kpi` since that's the dashboard's dominant query pattern.
+- Indexes: B-tree on every FK column in fact tables; composite index on `(college_key, semester_key)` on `fact_institution_kpi` since that's the dominant query pattern for any consumer (Web Team included).
 - `dim_student` SCD2 uses a partial unique index on `(student_id) WHERE _is_current = true` to guarantee exactly one current row per student.
 
-## 9. Implementation Notes — Dimension Tables (Day 12)
+## 9. Implementation Notes — Dimension & Fact Tables
 
-**Module:** `pipelines/gold/build_dimensions.py`, run via `python -m pipelines.gold.build_dimensions`.
+> **⚠️ STALE — pending regeneration.** The prior version of this section reported concrete, real results from a build run against the **old 8-semester academic-year model** (e.g., 8,012 `dim_student` rows for 7,800 students, exact fact row counts, a specific SCD2 entry-semester-shift bug fix). That academic-year model has been replaced by the 6-semester model in §1 above, so those exact counts no longer describe this project and must be re-derived once `data_generator` and the Gold build are re-run against the corrected calendar. The **design decisions and lessons below remain valid** and are kept for that reason — only the numbers are stale.
 
-**Two adaptations from this document's original design, made explicit rather than silently reconciled:**
-1. `_valid_from`/`_valid_to` were originally specified as `DATE`. This project has no literal date fields anywhere in its model — only `academic_year` + `semester_number`. The honest equivalent, actually implemented, is `_valid_from_semester_key`/`_valid_to_semester_key`, both FKs into `dim_semester`.
-2. SCD2 history-building (`build_dim_student`) is written in plain Python, not DuckDB SQL, despite this project's stated preference for DuckDB SQL transforms (`07_Technology_Stack.md`). Cleaning (Day 10) and dedup (Day 11) are naturally set-based — exactly what SQL is good at. SCD2 construction is inherently *sequential* per student (open a row, watch for a shift, close it, open the next). Forcing that into one complex window-function SQL expression would trade clarity for a consistency that isn't worth it — using the right tool per sub-problem, not the same tool everywhere, is the actual judgment being exercised here.
+**Design decisions carried forward unchanged:**
+1. `_valid_from`/`_valid_to` are modeled as `_valid_from_semester_key`/`_valid_to_semester_key` (FKs into `dim_semester`), not literal dates — this project has no literal date fields anywhere in its source model, only `academic_year` + `semester_number`.
+2. SCD2 history-building (`build_dim_student`) is written in plain Python, not DuckDB SQL, despite this project's general preference for DuckDB SQL transforms. Cleaning and dedup are naturally set-based; SCD2 construction is inherently *sequential* per student — using the right tool per sub-problem, not the same tool everywhere.
+3. A real, previously-found bug is worth re-testing for, not just re-fixing blindly: a student who shifts programs in their *entry* semester has no valid "prior period" to close a dimension row at. The regression test for this (`test_student_who_shifts_in_their_entry_semester_gets_exactly_one_row`) should be re-run — and is expected to still matter — under the corrected 6-semester calendar, since the underlying mechanic (shift-in-entry-semester) doesn't depend on how many semesters are in scope.
 
-**A real bug, found by running against real data, not by review.** The first implementation closed a shifted student's prior SCD2 row at `shift_semester - 1`. That's correct for the common case — but 35 of Day 5's 352 shifters shifted in their *entry* semester itself (Day 5's `simulate_student` applies the shift check before emitting that semester's own enrollment record, so even the very first observed record already reflects the post-shift program). For those students, "the semester before entry" doesn't exist, and the lookup silently returned `None` — producing a "closed" row with a nonsensical null `_valid_to_semester_key`. Caught by checking the actual output (`non_current["_valid_to_semester_key"].isna().sum()` was 35, not 0) rather than assuming a design that looked complete on paper was complete in practice. **Fix:** when a shift's semester equals the entry semester, there's no observable "before" period at all — the student gets exactly one row, open, already reflecting the post-shift program, instead of two rows where the first is unclosable. This exact scenario is now a permanent regression test (`test_student_who_shifts_in_their_entry_semester_gets_exactly_one_row`).
+**`dim_calendar`'s disclosed simplification, updated:** the institution's actual academic calendar is now explicit (`2021-2022`, `2022-2023`, `2023-2024`, 2 semesters each) via `configs/academic_calendar.yaml`, rather than an assumed Jan–Jun/Jul–Dec split of a single calendar year. `dim_calendar` should derive semester start/end from that config, not from an inferred convention — this removes a simplification the earlier design had to disclose.
 
-**Confirmed against real data, after the fix:** 8,012 `dim_student` rows for 7,800 students — 7,588 with exactly one (never-shifted or entry-shifted) row, 212 shifted students with two properly-closed rows. Every one of the 7,800 students has **exactly one** current row (Day 12's validation checklist, checked directly, not assumed) and **zero** non-current rows with a null `_valid_to_semester_key` (down from 35 before the fix).
+**Where Postgres isn't yet involved:** Gold tables are written to `warehouse/gold_store/` as Parquet via the same `ObjectStorage` abstraction used for Bronze/Silver, since this sandbox has no running Postgres. Materializing these into the real warehouse only changes the write target, not the transformation logic — unaffected by the academic-year correction.
 
-**`dim_calendar`'s disclosed simplification:** the project brief specifies two semesters per academic year but never literal semester start/end dates. `dim_calendar` assumes semester 1 = Jan 1–Jun 30 and semester 2 = Jul 1–Dec 31 of the same calendar year — consistent with how `academic_year` is used everywhere else in this project as a single calendar year, not a split year. A real deployment would replace this with the institution's actual registrar calendar.
-
-**Where Postgres isn't yet involved:** Gold tables are written to `warehouse/gold_store/` as Parquet via the same `ObjectStorage` abstraction used for Bronze/Silver — this sandbox has no running Postgres (see Day 2's note). Materializing these into the real warehouse is Week 3's job; only the storage target changes, not this logic.
-
-**Testing:** `tests/unit/test_build_dimensions.py` — 14 tests, including the entry-semester-shift regression test above and a broader property test (`test_dim_student_exactly_one_current_row_per_student_at_scale`) across a mix of never-shifted, mid-history-shifted, and entry-semester-shifted students confirming the "exactly one current row per student" invariant holds generally, not just for the one case that happened to break.
-
-## 10. Implementation Notes — Fact Tables (Day 13)
-
-**Module:** `pipelines/gold/build_facts.py`, run via `python -m pipelines.gold.build_facts`.
-
-**The centerpiece: an AS-OF join against `dim_student`'s SCD2 history, not a lookup against "the current row."** Every fact table resolves `student_key` via `resolve_student_key_as_of()` — a DuckDB SQL join matching each enrollment/graduation/dropout/shifter row's own semester against the `dim_student` row whose `[_valid_from_semester_key, _valid_to_semester_key]` range actually contains it. This is the entire reason Day 12 built real SCD2 history instead of just overwriting `dim_student` in place: a pre-shift enrollment record must resolve to the *old* dimension row, not the student's current one, or every pre-shift semester would incorrectly appear to have always been in the post-shift program. Verified directly with a two-student, one-shift fixture: a 2021-1 (pre-shift) enrollment record resolves to `student_key=1`, and the 2021-2 (post-shift) record for the *same student* resolves to `student_key=2` — proving the join is time-aware, not just student-aware.
-
-**Row counts reconcile exactly against Silver — checked, not assumed:** `fact_enrollment` (32,701), `fact_graduation` (965), `fact_dropout` (1,255), `fact_shifter` (352) all match their Silver source counts precisely, meaning none of the dimension-key joins (an easy place for an inner join to silently drop unmatched rows) lost anything.
-
-**`fact_retention`'s grain is deliberately narrower than "every enrollment row."** Two categories of row are excluded, not mislabeled: rows already `GRADUATED` (there's nothing left to "retain" past graduation), and rows at the final observed semester (2024-2 — there's no subsequent semester to check, so retention there is *undefined*, not *false*). `is_retained = 1` only if the student has an `ENROLLED` or `GRADUATED` record in the immediately following semester; a dropout or simply no further record both correctly yield `0`.
-
-**On "MERGE/upsert" vs. full rebuild — an adaptation from the original roadmap wording, made explicit:** `docs/12_Implementation_Roadmap.md` describes fact loads as keyed `MERGE`/upsert, which assumes an incrementally-maintained warehouse table. At this data volume (tens of thousands of rows), Gold facts are instead **fully rebuilt from Silver on every run** — simpler than incremental merge, and it sidesteps an entire class of incremental-merge bugs (partial updates, forgotten backfills, drift between merge logic and full-rebuild logic) that wouldn't be worth the complexity here. Idempotency is achieved just as genuinely, differently: the same Silver input always produces the exact same Gold output. Proven directly — running `build_all_facts()` twice against the real dataset produces **identical** row counts across all five facts, and a separate fixture-based test confirms the *content* doesn't duplicate either (re-running overwrites, not appends).
-
-**Testing:** `tests/unit/test_build_facts.py` — 12 tests: the AS-OF join proven correct across pre-shift, post-shift, and never-shifted students; row-count reconciliation for each fact; `fact_retention`'s exclusion rules (graduated, final-semester) and both retained/not-retained outcomes; and a full idempotency test running the entire fact build twice against identical Silver/Gold fixture state.
+**Testing:** the existing test suites (`test_build_dimensions.py`, `test_build_facts.py`) keep their structure; fixture data and any hardcoded semester-count assertions (e.g., "8 semesters," "64 KPI rows") need updating to the 6-semester grain (`48 KPI rows` for `fact_institution_kpi`) before they can be trusted again.
 
 ---
 *Next: `05_Medallion_Architecture.md` — Bronze/Silver/Gold implementation detail.*

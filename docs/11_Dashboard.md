@@ -1,75 +1,57 @@
-# 11 — Dashboard Design
+# 11 — Data Consumption Contract (formerly "Dashboard Design")
+
+> **This document replaces the previous `11_Dashboard.md`.** This repo (Data Engineering + Data Science) does not build, own, or operate dashboards. That responsibility belongs to the **Web Team**. This document defines the *contract* between the two teams — what's published, how it's accessed, and what questions it's designed to answer — so the Web Team can build whatever presentation layer they choose against a stable, tested, documented interface.
 
 ## 1. Design Principle
 
-**Dashboards read Gold/marts only, and contain zero business logic.** Every number shown was already computed, tested, and validated upstream (`fact_institution_kpi`, `mart_*` models). This is what guarantees the dashboard never disagrees with a direct SQL query against the warehouse.
+**The Web Team reads `gold`/`marts` only, through the `web_service_reader` role, and contains zero business logic of its own.** Every number it displays was already computed, tested, and validated upstream (`fact_institution_kpi`, `mart_*` models). This is what guarantees the Web Team's presentation never disagrees with a direct SQL query against the warehouse — and it's enforced at the database level (`06_Data_Warehouse.md` §5), not just by convention.
 
-## 2. Dashboard Suite Overview
+## 2. What Is Published (the Contract Surface)
 
-```mermaid
-flowchart TB
-    Nav[Navigation Shell] --> Exec[Executive Dashboard]
-    Nav --> Coll[College Dashboard]
-    Nav --> Prog[Program Dashboard]
-    Nav --> Enr[Enrollment Dashboard]
-    Nav --> Fore[Forecast Dashboard]
-    Nav --> Ret[Retention Dashboard]
-    Nav --> Drop[Dropout Dashboard]
-    Nav --> Grad[Graduation Dashboard]
-    Nav --> KPI[Institution KPI Dashboard]
-    Exec -.drill down.-> Coll -.drill down.-> Prog
-```
+| Mart | Grain | Primary question it answers |
+|---|---|---|
+| `mart_executive_summary` | Campus-wide, per semester | One-screen institutional health check |
+| `mart_college_performance` | Per college, per semester | How is each college trending? |
+| `mart_program_performance` | Per program, per semester | How is each program trending, within its college? |
+| `mart_institution_kpi` | Per college, per semester | Success Rate composite + all 6 sub-components, per `09_Data_Science.md` |
+| `mart_retention_risk` | Per program | Programs with 2+ consecutive semesters of declining retention |
+| `fact_forecast` (via `gold`) | Per entity, metric, target semester | Enrollment/graduate/population forecasts with confidence bounds |
 
-### 2.1 Executive Dashboard
-**Audience:** university leadership. **Purpose:** one-screen institutional health check.
-- KPI cards: overall Success Rate (current semester + trend arrow), total enrollment, total graduates, dropout rate.
-- Line chart: Success Rate over time (2021-1 → 2024-2), campus-wide.
-- Bar chart: Success Rate by college, current semester (drill-down entry point).
-- Filters: academic year, semester.
+Every mart is versioned, tested (`not_null`/`unique`/`relationships` at minimum — `13_Best_Practices.md`), and documented via `dbt docs generate`, which is the literal artifact handed to the Web Team as the interface spec.
 
-### 2.2 College Dashboard
-- KPI cards scoped to selected college: enrollment, retention rate, graduation rate, dropout rate, success rate.
-- Bar chart: success rate by program within the college (drill-down to Program Dashboard).
-- Trend line: college success rate over time vs. campus-wide average (benchmarking).
-- Filters: college selector, year range.
+## 3. Recommended Consumption Patterns (Guidance, Not a Build Spec)
 
-### 2.3 Program Dashboard
-- Enrollment by year level (stacked bar) — shows where in the pipeline students are concentrated.
-- Retention funnel: cohort size → year 2 → year 3 → year 4 → graduates (funnel chart).
+The sections below describe the kinds of questions each mart is designed to support, based on how administrators actually think about the data (top-line number → which college is driving it → which program within that college). This is offered as **collaboration input for the Web Team**, not a screen-by-screen build plan this repo is delivering — the Web Team decides layout, chart library, navigation, and tooling entirely on their own.
+
+### 3.1 Executive-Level View
+**Audience:** university leadership. **Supported by:** `mart_executive_summary`.
+- Overall Success Rate (current semester + trend), total enrollment, total graduates, dropout rate.
+- Success Rate over time, campus-wide, across all 6 in-scope semesters (`2021-2022, 1st Semester` → `2023-2024, 2nd Semester`).
+- Success Rate by college, current semester.
+
+### 3.2 College-Level View
+**Supported by:** `mart_college_performance`.
+- Enrollment, retention rate, graduation rate, dropout rate, success rate, scoped to one college.
+- Success rate by program within the college.
+- College success rate over time vs. campus-wide average.
+
+### 3.3 Program-Level View
+**Supported by:** `mart_program_performance`.
+- Enrollment by year level (`Freshman` through `Super Senior` — all five, not entering students only, per `04_Data_Modeling.md`'s `dim_year_level`).
+- Cohort retention curve: entering cohort size → each subsequent year level → graduates.
 - Dropout/shifter counts, by semester.
-- Filters: program selector, cohort year.
 
-### 2.4 Enrollment Dashboard
-- Total enrollment trend, campus-wide and by college.
-- New enrollee vs. continuing student split (stacked area chart).
-- Table: enrollment by program, current vs. prior semester, with % change.
+### 3.4 Forecast View
+**Supported by:** `fact_forecast` + `mart_institution_kpi`.
+- Historical actuals + Prophet forecast with confidence band, selectable metric and entity.
+- Forecast accuracy of prior forecasts vs. actuals.
+- **A disclosure the Web Team should surface, not bury:** forecasts here are built on only 6 semesters of history (`10_Forecasting.md`), which bounds their confidence more tightly than a longer-running institution's data would.
 
-### 2.5 Forecast Dashboard
-- Line chart: historical actuals + Prophet forecast with confidence band, selectable metric (enrollment/graduates/population) and entity (college/program).
-- Table: forecast accuracy of prior forecasts vs. actuals (MAE/MAPE per past forecast).
-- Filters: entity, metric, forecast horizon (1 or 2 semesters ahead).
+### 3.5 Institution KPI View
+**Supported by:** `mart_institution_kpi`.
+- All six Success Rate sub-components shown alongside the composite — directly supporting the transparency principle from `09_Data_Science.md` §5.
 
-### 2.6 Retention Dashboard
-- Retention rate trend by college/program.
-- Cohort retention curves (% of entering cohort still enrolled at each subsequent semester) — the classic "cohort survival curve" view.
-
-### 2.7 Dropout Dashboard
-- Dropout rate trend by college/program.
-- Dropout concentration by year level (where in the student journey attrition happens most).
-
-### 2.8 Graduation Dashboard
-- Graduation counts and rate trend by college/program.
-- Average years-to-completion distribution.
-
-### 2.9 Institution KPI Dashboard
-- All six Success Rate sub-components shown side-by-side (not just the composite) — directly supporting the transparency principle from `09_Data_Science.md`.
-- Composite Success Rate trend with a component breakdown on hover/click.
-
-## 3. Navigation & Drill-Down Pattern
-
-Executive → College → Program is the primary drill-down chain, implemented via Superset's native filter-linking (clicking a college bar on the Executive dashboard sets a College filter and links to the College dashboard). This mirrors how administrators actually think about the org hierarchy — top-line number first, then "which college is driving this," then "which program within that college."
-
-## 4. Suggested Chart Types Summary
+## 4. Suggested Chart Types Summary (Non-Binding)
 
 | Question type | Chart |
 |---|---|
@@ -80,9 +62,9 @@ Executive → College → Program is the primary drill-down chain, implemented v
 | "What's the KPI right now?" | Big number / KPI card with trend arrow |
 | "How confident is the forecast?" | Line chart + shaded confidence interval band |
 
-## 5. Why Superset + a Small Streamlit App, Not One Tool for Everything
+## 5. What This Repo Does Not Decide
 
-Superset handles the 8 "standard BI" dashboards well — they're fundamentally filter/drill-down over pre-aggregated marts, exactly Superset's strength. The Forecast Dashboard's "select entity, select metric, see forecast + accuracy history" interaction is more naturally built as a small custom Streamlit app directly querying `fact_forecast` and `mart_forecast_accuracy` — giving full control over the confidence-band visualization and forecast-vs-actual comparison view without fighting a BI tool's chart builder for a fairly specific interactive layout. Both read only from `gold`/`marts` schemas — the split is a presentation-tooling choice, not a data-architecture one.
+Presentation tooling (Superset, Streamlit, a custom web app, anything else), navigation/drill-down implementation, authentication, and UI/UX are entirely the Web Team's decisions. This repo's obligation ends at: a correct, tested, documented `gold`/`marts` schema, and a working `web_service_reader` role. If the Web Team's chosen tool changes tomorrow, nothing in this repo needs to change.
 
 ---
 *Next: `12_Implementation_Roadmap.md` — the day-by-day 30-day build plan.*

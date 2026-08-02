@@ -2,7 +2,7 @@
 
 ## 1. What We're Forecasting
 
-Per `(college or program, target semester)`: **enrollment count**, **graduate count**, and **total student population**. These are the three metrics with a natural, continuous historical time series (8 semesters, 2021-1 through 2024-2) that administrators explicitly asked to forecast.
+Per `(college or program, target semester)`: **enrollment count**, **graduate count**, and **total student population**. These are the three metrics with a natural, continuous historical time series — **6 semesters, `2021-2022, 1st Semester` through `2023-2024, 2nd Semester`** (corrected from a previous, incorrect 8-semester model) — that administrators explicitly asked to forecast.
 
 ## 2. Feature Engineering
 
@@ -10,11 +10,11 @@ The ML feature table (`ml_forecast_features`, a Gold-layer table) is built with 
 
 | Feature | Description | Why it matters |
 |---|---|---|
-| `semester_number` | 1 or 2 | Captures within-year seasonality (semesters aren't identical — e.g., enrollment often dips slightly in semester 2 for some programs) |
-| `academic_year` | 2021–2024 | Trend anchor |
+| `semester_number` | 1 or 2 | Captures within-year seasonality |
+| `academic_year` | `2021-2022`, `2022-2023`, or `2023-2024` | Trend anchor — a school-year label, not a bare year |
 | `college` / `program` | Categorical entity key | Allows per-entity models or entity as a regressor |
 | `enrollment_growth` | `(current − previous) / previous` | Direct trend signal |
-| `retention_rate`, `dropout_rate`, `graduation_rate` | From `fact_institution_kpi` | Leading indicators — a rising dropout rate this semester predicts lower enrollment next semester |
+| `retention_rate`, `dropout_rate`, `graduation_rate` | From `fact_institution_kpi` | Leading indicators |
 | `student_progression_index` | From success-rate's Program Completion Momentum component | Structural health signal |
 | `cohort_size` | Size of the entering cohort N semesters ago (aligned to nominal duration) | Predicts upcoming graduation volume specifically |
 | `historical_average` | Mean of the target metric over all prior semesters | Simple baseline anchor |
@@ -23,81 +23,66 @@ The ML feature table (`ml_forecast_features`, a Gold-layer table) is built with 
 | `trend_component` | Linear trend coefficient fit over all prior semesters | Captures structural growth/decline separate from seasonality |
 | `seasonality_component` | Average deviation of semester 1 vs semester 2 from the trend line | Isolates the semester-parity effect from trend |
 
-**Why lag + rolling + trend + seasonality together, not just one:** each captures a different, complementary signal — lag features capture short-term momentum, rolling averages smooth noise, trend captures the structural direction, and the seasonality component captures the semester-1-vs-2 pattern. A model given only raw historical values would conflate all four; giving it these as separate columns lets it (or a human reviewing feature importance) attribute the forecast to the right cause.
-
-**A hard limitation, stated directly:** with only 8 semesters (2021–2024) of history, there is very little data per entity — some programs will have fewer than 8 usable data points if they're newer or small. This bounds which models are even appropriate (see below) and bounds how much confidence the forecast should carry; this is disclosed to the reader of the forecast, not hidden behind a confident-looking chart.
+**A hard limitation, now stated more strongly than before:** with only **6 semesters** of history (down from the previously-assumed, incorrect 8), there is even less data per entity than earlier drafts of this document disclosed — some programs will have fewer than 6 usable data points if they're newer or small, and `lag_2` alone consumes a third of the entire series. This bounds which models are even appropriate (see below) even more tightly than before, and bounds how much confidence any forecast should carry; this must be disclosed to the reader of the forecast, not hidden behind a confident-looking chart.
 
 ## 3. Model Comparison
 
 | | Prophet | ARIMA/SARIMA | Linear Regression | Random Forest Regression | XGBoost | LSTM |
 |---|---|---|---|---|---|---|
 | Advantages | Handles trend + seasonality out of the box, interpretable components, robust to missing data | Strong classical statistical foundation, well-understood confidence intervals | Simple, highly interpretable, fast to explain to a non-technical panel | Captures non-linear interactions between features, robust to outliers | Often best raw accuracy on tabular feature sets | Can model complex sequential dependencies |
-| Disadvantages | Less flexible for highly irregular/non-seasonal series | Requires careful manual tuning (p,d,q / seasonal orders), sensitive to stationarity assumptions | Can't capture non-linear trend changes or seasonality without manual feature engineering | Harder to explain to non-technical stakeholders than linear/Prophet; needs enough data to avoid overfitting | Needs careful tuning, higher overfitting risk on very small datasets | **Needs far more data than 8–16 data points per series; will overfit and become an uninterpretable black box here** |
-| Interpretability | High (trend/seasonality/holiday components are inspectable) | Medium (coefficients are statistically meaningful but less intuitive) | High | Medium (feature importances only) | Medium | Low |
-| Scalability | Good — designed for many parallel per-entity series ("one Prophet model per program" scales fine) | Good, but per-series manual tuning doesn't scale to 30 programs easily | Good | Good | Good | Poor at this data volume |
-| Data requirements | Low–medium; works with just a handful of seasonal cycles | Medium–high; needs enough history to estimate seasonal orders reliably | Low | Medium | Medium–high | **High** — this is the disqualifying factor here |
-| Training speed | Fast | Fast–medium (per-series tuning takes time) | Very fast | Fast | Fast | Slow, and unstable on tiny datasets |
-| Capstone/maintenance | **High** — one clear library, minimal per-series manual tuning, results are explainable in a defense | Medium — defensible but requires justifying (p,d,q) choices per series in a viva | High as an interpretable *baseline*, not primary | Medium, good as secondary comparison model | Medium, good as secondary comparison model | **Excluded** |
+| Disadvantages | Less flexible for highly irregular/non-seasonal series | Requires careful manual tuning, sensitive to stationarity assumptions | Can't capture non-linear trend changes or seasonality without manual feature engineering | Harder to explain than linear/Prophet; needs enough data to avoid overfitting | Needs careful tuning, higher overfitting risk on very small datasets | **Needs far more data than 6 data points per series; will overfit and become an uninterpretable black box here** |
+| Data requirements | Low–medium; works with just a handful of seasonal cycles | Medium–high | Low | Medium | Medium–high | **High** — even more clearly disqualifying under the corrected 6-semester model than under the old 8-semester one |
+| Capstone/maintenance | **High** — one clear library, minimal per-series manual tuning | Medium — requires justifying per-series orders in a viva | High as an interpretable *baseline*, not primary | Medium, good as secondary comparison model | Medium, good as secondary comparison model | **Excluded** |
 
 ## 4. Final Model Selection: Prophet
 
 **Decision: Prophet is the primary forecasting model.** Linear Regression is retained as an interpretable baseline for comparison during evaluation (not deployed to `fact_forecast`).
 
 **Justification:**
-1. **Data volume fit** — Prophet is explicitly designed to work well with a small number of seasonal cycles (here: 8 semesters = 4 "seasonal years"), unlike LSTM which needs orders of magnitude more data to avoid overfitting, and unlike ARIMA/SARIMA which need careful per-series order selection that doesn't scale cleanly across ~30 programs and 8 colleges without a lot of manual tuning time this one-month capstone doesn't have.
-2. **Automatic trend + seasonality decomposition** — the semester-1-vs-semester-2 pattern (an academic-calendar-specific seasonality) is exactly the shape Prophet models natively, without hand-engineering ARIMA's seasonal order parameters.
-3. **Interpretability for a capstone defense** — Prophet's decomposed output (trend line + seasonal component + uncertainty interval) can be shown directly on a chart and explained component-by-component to a panel, which is a materially stronger defense position than "the model has 400 weights and I can't tell you why it predicted 812 students."
-4. **Operational simplicity** — one Prophet model can be fit per `(college, metric)` or `(program, metric)` series in a simple loop, which fits the batch/orchestration model already used everywhere else in this pipeline (no separate serving infrastructure needed).
+1. **Data volume fit** — Prophet is explicitly designed to work well with a small number of seasonal cycles. Under the corrected model that's **6 semesters = 3 "seasonal years,"** an even thinner series than the 4 "seasonal years" this document previously (incorrectly) assumed — which makes the case *against* data-hungry models (LSTM, careful per-series ARIMA tuning) stronger, not weaker.
+2. **Automatic trend + seasonality decomposition** — the semester-1-vs-semester-2 pattern is exactly the shape Prophet models natively.
+3. **Interpretability for a capstone defense** — Prophet's decomposed output (trend line + seasonal component + uncertainty interval) can be shown directly on a chart and explained component-by-component to a panel.
+4. **Operational simplicity** — one Prophet model can be fit per `(college, metric)` or `(program, metric)` series in a simple loop.
 
-**Why not XGBoost/Random Forest as primary despite often-higher raw accuracy on tabular data:** with only 8 historical points per series, there isn't enough data to reliably validate that a more flexible, higher-variance model (XGBoost/RF) is actually more accurate rather than just better-fit to noise — the honest answer at this data volume is that a simpler, structurally-motivated model (Prophet, with a known trend+seasonality decomposition matching the real academic calendar) is *more* trustworthy, not less capable. This is disclosed directly rather than picking the "more impressive-sounding" model.
+**Why not XGBoost/Random Forest as primary despite often-higher raw accuracy on tabular data:** with only 6 historical points per series — even fewer than the 8 this document previously assumed — there is even less basis to trust that a more flexible, higher-variance model is actually more accurate rather than just better-fit to noise. The honest answer at this (now smaller) data volume is that a simpler, structurally-motivated model is *more* trustworthy, not less capable, and the case for disclosing this limitation prominently on any forecast is stronger than it was before the calendar correction.
 
 ## 5. Model Evaluation
 
 ### Metrics Used
 | Metric | What it measures | Why included |
 |---|---|---|
-| MAE (Mean Absolute Error) | Average absolute forecast error, in original units (students) | Directly interpretable to non-technical stakeholders ("off by ~12 students on average") |
+| MAE (Mean Absolute Error) | Average absolute forecast error, in original units (students) | Directly interpretable to non-technical stakeholders |
 | RMSE (Root Mean Squared Error) | Like MAE but penalizes large errors more | Surfaces whether the model has occasional big misses MAE would hide |
 | MAPE (Mean Absolute Percentage Error) | Error as a % of actual value | Comparable across small vs. large programs |
-| R² | Proportion of variance explained | Sanity check against a naive baseline (predicting last semester's value) |
+| R² | Proportion of variance explained | Sanity check against a naive baseline |
 
 ### Validation Strategy: Walk-Forward (Time Series) Validation
-Standard k-fold cross-validation is **not used**, because it randomly shuffles data across folds — for time series, this leaks future information into training (the model would "see the future" during validation), producing artificially optimistic accuracy. Instead:
+Standard k-fold cross-validation is **not used**, because it randomly shuffles data across folds — for time series, this leaks future information into training. Instead, under the corrected 6-semester grain:
 
 ```
-Train: 2021-1 → 2022-2  |  Test: 2023-1
-Train: 2021-1 → 2023-1  |  Test: 2023-2
-Train: 2021-1 → 2023-2  |  Test: 2024-1
-Train: 2021-1 → 2024-1  |  Test: 2024-2
+Train: 2021-2022 S1 → 2022-2023 S1  |  Test: 2022-2023 S2
+Train: 2021-2022 S1 → 2022-2023 S2  |  Test: 2023-2024 S1
+Train: 2021-2022 S1 → 2023-2024 S1  |  Test: 2023-2024 S2
 ```
 
-Each fold trains only on data strictly before the test point (walk-forward / expanding-window split), then errors are averaged across folds — this is the only validation approach that honestly simulates "what would this model have predicted, at the time, using only information available then."
+Only **3 walk-forward folds** are available under the corrected model (down from the 4 folds a previous, incorrect 8-semester draft used) — a direct, disclosed consequence of the academic-calendar fix. Each fold trains only on data strictly before the test point, then errors are averaged across folds. With this few folds, the evaluation report should treat any per-fold metric as a point estimate with wide, disclosed uncertainty, not a precise accuracy figure.
 
 ### Baseline Comparison (Required, Not Optional)
-Every Prophet forecast is compared against a **naive baseline** (last semester's actual value) and a **historical-average baseline**. If Prophet doesn't outperform these simple baselines on a given series, that's reported honestly rather than hidden — for very small or highly volatile programs, a naive baseline may legitimately be competitive, and the evaluation report should say so.
+Every Prophet forecast is compared against a **naive baseline** (last semester's actual value) and a **historical-average baseline**. If Prophet doesn't outperform these simple baselines on a given series, that's reported honestly rather than hidden.
 
-## 5.1 Implementation Notes and Real Results (Day 20)
+## 5.1 Implementation Notes and Real Results
 
-**Modules:** `models/forecasting/metrics.py` (pure MAE/RMSE/MAPE/R² functions), `models/forecasting/baselines.py` (naive + historical-average), `models/forecasting/train_prophet.py` (the walk-forward harness + final model training), run via `python -m models.forecasting.train_prophet`. Trained model artifacts land in `forecasting/artifacts/{college_id}_{metric}_prophet.pkl`; the evaluation report lands in `forecasting/artifacts/evaluation_report.{csv,md}`.
+> **⚠️ STALE — pending regeneration.** The prior version of this section reported real evaluation results (e.g., "Prophet beats the best baseline on 8 of 16 series," a metric-level 100%/0% split by `enrollment_count` vs. `graduation_count`) measured against the old, incorrect 8-semester dataset with 4 walk-forward folds. Those results must be re-produced from scratch once the generator and pipeline are re-run under the corrected 6-semester, 3-fold model — the underlying finding (graduation-count series are structurally hard to beat with a trend model because most cohorts haven't reached graduation eligibility within the observed window) is *expected to still apply, and likely more severely*, given the shorter observation window, but this must be re-verified against real output, not assumed to carry over unchanged.
 
-**The honest headline result: Prophet beats the best baseline on 8 of 16 series (50%) — not the "majority" this section's validation checklist calls for, taken at face value.** But the aggregate number hides a far more informative, and far cleaner, pattern underneath it, worth reporting instead of the single top-line figure:
+**Modules (unaffected by the calendar fix):** `models/forecasting/metrics.py`, `models/forecasting/baselines.py`, `models/forecasting/train_prophet.py`, run via `python -m models.forecasting.train_prophet`.
 
-| Target metric | Prophet beats baseline |
-|---|---|
-| `enrollment_count` | **8 / 8 colleges (100%)** |
-| `graduation_count` | **0 / 8 colleges (0%)** |
+**Prophet configuration, and why (unaffected by the calendar fix):** `yearly_seasonality=2` (a low Fourier order, vs. Prophet's default 10) — with as few as 2–3 training points in the earliest walk-forward fold under the 6-semester model, a high-order seasonal fit would overfit even more readily than it would have under the old 8-semester model. `weekly_seasonality`/`daily_seasonality` disabled outright, since this is semester-grain data.
 
-This isn't a random 50/50 split — it's a perfect split *by metric*, and it has a specific, traceable cause rather than being an unexplained anomaly. Inspecting the real data directly (CICT's `graduation_count` across all 8 semesters): `0, 0, 0, 0, 0, 0, 0, 99`. Seven of eight values are exactly zero. This is the cohort-truncation limitation disclosed since Week 1 (`08_Faker_Data_Generator.md` Section 10: this generator only simulates students *entering* during the observed window, so almost no cohort reaches graduation eligibility until the very end of it) — now visibly propagating all the way through to forecast evaluation, three weeks and several pipeline layers later. A naive "predict last value" baseline on a series that's mostly zero is *structurally* hard to beat: predicting 0 is usually correct by construction, and a trend-fitting model like Prophet, which will generally produce some small positive fitted value even for a mostly-flat series, looks "worse" by MAE despite arguably behaving more sensibly than a baseline that's really just exploiting the series' degeneracy.
-
-**This was not patched by tweaking Prophet's configuration to force a better-looking aggregate number.** The honest conclusion is that `enrollment_count` forecasts are meaningfully validated and trustworthy; `graduation_count` forecasts inherit a known, disclosed data limitation and should be presented with that caveat attached, not hidden behind an aggregate "50% beat rate" that obscures exactly which half is reliable. **This is precisely what Day 20's validation checklist item 2 asks for** — "series where it doesn't [beat the baseline] are explicitly flagged, not hidden" — satisfied at the metric level, not just the individual-series level.
-
-**Prophet configuration, and why:** `yearly_seasonality=2` (a low Fourier order, vs. Prophet's default 10) — with as few as 4 training points in the earliest walk-forward fold, a high-order seasonal fit would overfit the tiny amount of seasonal signal available. `weekly_seasonality`/`daily_seasonality` disabled outright, since this is semester-grain data and fitting sub-semester seasonality to it is fitting noise by definition.
-
-**Testing:** `tests/unit/test_forecasting_metrics.py` (14 tests, every metric checked against a hand-computed value first, plus edge cases: MAPE's zero-actual handling, R²'s degenerate constant-series cases) and `tests/unit/test_forecasting_baselines.py` (7 tests). `tests/unit/test_train_prophet.py` (10 tests) includes the metric-split finding above locked in as two permanent regression tests (`test_prophet_beats_baseline_on_every_enrollment_series`, `test_prophet_does_not_beat_baseline_on_graduation_series`) — if a future change to the feature set or Prophet configuration shifts this balance, the tests will need deliberate updating, which is exactly the point: the finding stays visible and intentional rather than silently drifting.
+**Testing:** `tests/unit/test_forecasting_metrics.py` and `tests/unit/test_forecasting_baselines.py` keep their structure; `tests/unit/test_train_prophet.py`'s regression tests need re-running (and possibly re-writing, since the fold count changed from 4 to 3) once real results exist again.
 
 ## 6. Forecast Output
 
-Predictions (with 80% confidence interval bounds from Prophet) are written to `gold.fact_forecast`, tagged with `model_version`, so historical forecasts remain queryable and comparable against what actually happened once real data arrives for that semester — enabling a "forecast accuracy over time" view in the dashboard itself.
+Predictions (with 80% confidence interval bounds from Prophet) are written to `gold.fact_forecast`, tagged with `model_version`, so historical forecasts remain queryable and comparable against what actually happened once real data arrives for that semester — enabling a "forecast accuracy over time" mart the Web Team can build a view on top of.
 
 ---
-*Next: `11_Dashboard.md` — dashboard suite design.*
+*Next: `11_Data_Consumption_Contract.md` — the published interface between this service and the Web Team.*
