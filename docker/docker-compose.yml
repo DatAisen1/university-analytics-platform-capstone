@@ -11,8 +11,34 @@
 # their actual use just adds services to keep alive with nothing to verify
 # against yet.
 #
-# Run from the project root:
-#   docker compose -f docker/docker-compose.yml --env-file .env up -d
+# Preferred entry point: `make up` / `make down` / `make ps` from the repo
+# root (see the root Makefile) -- it always passes the right flags for you.
+# Running plain `docker compose up -d` still works too, from EITHER the repo
+# root or this docker/ directory: see the env_file: ../.env line on each
+# service below, which is resolved relative to *this file's own location*,
+# not your current shell directory, so it finds the real .env either way.
+#
+# Task 53 fix: previously POSTGRES_USER/PASSWORD/DB and MINIO_ROOT_USER/
+# PASSWORD were only ever referenced via bare ${VAR} interpolation, which
+# Compose auto-discovers from a .env file it looks for in "the project
+# directory" -- which defaults to THIS file's directory (docker/), not the
+# repo root where .env actually lives, unless you always remember
+# `--env-file ../.env` / `--env-file .env` (run from root). Forget that flag
+# (e.g. `cd docker && docker compose up -d`) and Compose silently substitutes
+# an empty string for each undefined variable ("POSTGRES_USER not set"
+# warnings) instead of failing -- so Postgres/MinIO would start with blank
+# credentials rather than refusing to start. Two independent fixes below,
+# together closing both the "wrong invocation" and the "never copied
+# .env.example" cases:
+#   1. env_file: ../.env on each service -- always resolved relative to this
+#      file, so the container's actual runtime environment is populated
+#      correctly no matter which directory `docker compose` was invoked from.
+#   2. ${VAR:?message} on every required credential below -- this is Compose
+#      variable interpolation (a completely separate mechanism from
+#      env_file, evaluated before docker even starts), so it fails the
+#      command immediately with a clear, actionable error if that variable
+#      truly isn't set anywhere Compose can see it (e.g. .env doesn't exist
+#      at all yet). No more silent blanks either way.
 #
 # The "version:" top-level key is intentionally omitted — it's deprecated in
 # current Docker Compose (v2) and ignored with a warning if present.
@@ -22,16 +48,25 @@ services:
     image: postgres:16-alpine
     container_name: uap_postgres
     restart: unless-stopped
+    env_file:
+      # required: false -- if .env is missing entirely, let the ${VAR:?...}
+      # guards below fire with OUR clear message instead of a generic
+      # "env file not found" error from this directive.
+      - path: ../.env
+        required: false
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is not set -- run 'cp .env.example .env', fill in real values, then re-run}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set -- run 'cp .env.example .env', fill in real values, then re-run}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is not set -- run 'cp .env.example .env', fill in real values, then re-run}"
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # $$ (not $) so pg_isready reads POSTGRES_USER/DB from the CONTAINER's
+      # own environment at runtime -- guaranteed present via env_file above
+      # -- instead of Compose interpolating them on the host at parse time.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -43,9 +78,12 @@ services:
     container_name: uap_minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
+    env_file:
+      - path: ../.env
+        required: false
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?MINIO_ROOT_USER is not set -- run 'cp .env.example .env', fill in real values, then re-run}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set -- run 'cp .env.example .env', fill in real values, then re-run}"
     ports:
       - "${MINIO_API_PORT:-9000}:9000"       # S3-compatible API
       - "${MINIO_CONSOLE_PORT:-9001}:9001"   # Web console

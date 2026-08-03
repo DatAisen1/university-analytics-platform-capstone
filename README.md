@@ -70,14 +70,42 @@ cp .env.example .env
 # then edit .env and set real local passwords for POSTGRES_PASSWORD / MINIO_ROOT_PASSWORD
 ```
 
+`docker-compose.yml` now refuses to start Postgres or MinIO with a blank
+credential (`POSTGRES_USER`/`PASSWORD`/`DB`, `MINIO_ROOT_USER`/`PASSWORD`) --
+if `.env` is missing or incomplete, `docker compose up` fails immediately
+with an explicit "X is not set -- run cp .env.example .env..." error instead
+of silently starting with empty values. It also finds the repo-root `.env`
+correctly whether you run Compose from the repo root or from `docker/`.
+
 ### 3. Start Postgres + MinIO
 
+Recommended (works from any directory, always passes the right flags):
+```bash
+make up
+```
+Equivalent, if you'd rather not use `make`:
 ```bash
 docker compose -f docker/docker-compose.yml --env-file .env up -d
 ```
 
 ### 4. Verify both services are up and healthy
 
+A single `docker compose ps` is a point-in-time snapshot -- a container can
+sit at "starting" for a while before its healthcheck ever reports healthy
+(or never does, if something's wrong). For a clean-start verification that
+actually polls health status and fails loudly on a timeout:
+```bash
+make clean-start
+# runs: down -v -> up -d -> polls postgres/minio until "healthy" (or times
+# out with logs), then checks pg_isready and MinIO's liveness endpoint too
+```
+Dagster is intentionally not a docker-compose service in this project (it's
+run via the `dagster` CLI against the host Python environment) -- `make
+clean-start` verifies it instead by validating `orchestration/definitions.py`
+loads (`dagster definitions validate`), which is the CLI-orchestrator
+equivalent of a healthcheck here.
+
+Or just the snapshot, if you prefer:
 ```bash
 docker compose -f docker/docker-compose.yml ps
 # both "postgres" and "minio" should show state "healthy", not just "running"
@@ -88,10 +116,32 @@ docker compose -f docker/docker-compose.yml ps
 docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "SELECT version();"
 ```
 
-**Verify MinIO console is reachable:** open `http://localhost:9001` in a browser and log in with `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from your `.env`. The MinIO S3 API itself is on `http://localhost:9000`.
+**Verify MinIO actually has data in it (not just that it's running):** a
+pipeline script exiting successfully is not proof its output exists in
+MinIO. Check through all three channels:
+```bash
+make verify-minio
+# Channel 1 (Python client, boto3): runs automatically, lists real object
+#   counts/sizes per bucket -- an empty bucket "exists" too, so this checks
+#   contents, not presence.
+# Channel 2 (CLI): prints the exact `mc ls ... --recursive` commands to
+#   cross-check against.
+# Channel 3 (Console): prints the http://localhost:9001 URL and what to
+#   click through to confirm the same objects visually.
+```
+Every MinIO/S3 write in the pipeline itself (`pipelines/common/storage.py`'s
+`S3Storage.write_bytes`) now also reads each object back immediately after
+writing it and raises before the pipeline can report success if that
+read-back fails or the size doesn't match -- so a silently-lost write is
+caught at write time, not discovered later by an audit.
 
 ### 5. Tear down (when needed)
 
+```bash
+make down      # stop containers, keep data
+make down-v    # stop containers AND wipe volumes (clean slate)
+```
+Equivalent, without `make`:
 ```bash
 docker compose -f docker/docker-compose.yml down        # stop containers, keep data
 docker compose -f docker/docker-compose.yml down -v      # stop containers AND wipe volumes (clean slate)

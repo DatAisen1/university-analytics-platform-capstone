@@ -147,6 +147,14 @@ class S3Storage(ObjectStorage):
         )
 
     def write_bytes(self, key: str, data: bytes) -> None:
+        """Write `data` to `key`, then read it back to confirm it's really
+        there (Task 55). A successful `put_object` call only means MinIO/S3
+        accepted and acknowledged the request -- it is NOT proof the object
+        is visible afterward (a script that "completed successfully" is not
+        the same claim as "the data exists in MinIO"; see e.g. eventual-
+        consistency edge cases, silent client/network issues, or a bucket
+        policy quirk that accepts writes but serves stale reads). This
+        write-then-verify round trip is the only way to actually know."""
         from botocore.exceptions import BotoCoreError, ClientError
         try:
             self._client.put_object(Bucket=self.bucket, Key=key, Body=data)
@@ -155,6 +163,23 @@ class S3Storage(ObjectStorage):
                 f"Failed to write object to MinIO/S3: {exc}",
                 stage="Object Storage Write", entity=key, details={"bucket": self.bucket},
             ) from exc
+
+        try:
+            verified = self.stat(key)
+        except (FileNotFoundError, BotoCoreError, ClientError) as exc:
+            raise MinioError(
+                f"Write to MinIO/S3 appeared to succeed but the object could not be "
+                f"verified afterward (head_object failed): {exc}",
+                stage="Object Storage Write Verification", entity=key, details={"bucket": self.bucket},
+            ) from exc
+
+        if verified.size_bytes != len(data):
+            raise MinioError(
+                f"Write to MinIO/S3 was verified but the stored size ({verified.size_bytes} "
+                f"bytes) does not match what was written ({len(data)} bytes) -- treating "
+                f"this as a failed write rather than trusting put_object's success response.",
+                stage="Object Storage Write Verification", entity=key, details={"bucket": self.bucket},
+            )
 
     def read_bytes(self, key: str) -> bytes:
         from botocore.exceptions import BotoCoreError, ClientError

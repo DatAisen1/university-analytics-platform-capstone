@@ -13,12 +13,15 @@ boto3 call logic itself is correct; a live MinIO smoke test is still
 something to run on your own machine once `docker compose up` works there.
 """
 
+from datetime import datetime, timezone
+
 import boto3
 import pytest
 from moto import mock_aws
 
 from pipelines.common.config import ConfigError
-from pipelines.common.storage import LocalFileStorage, S3Storage, load_minio_storage_from_env
+from pipelines.common.errors import MinioError
+from pipelines.common.storage import LocalFileStorage, ObjectMetadata, S3Storage, load_minio_storage_from_env
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,44 @@ def test_stat_zero_byte_object_reports_zero_size(storage):
     storage.write_bytes("bronze/student/all/empty.parquet", b"")
     meta = storage.stat("bronze/student/all/empty.parquet")
     assert meta.size_bytes == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 55: write_bytes must verify the object is actually visible afterward
+# -- a successful put_object response is not proof data exists in MinIO/S3.
+# These exercise S3Storage specifically (LocalFileStorage's write_bytes is a
+# direct filesystem write with no separate "did it really land" question).
+# ---------------------------------------------------------------------------
+
+def test_write_bytes_raises_minio_error_when_post_write_verification_fails(mocked_s3_storage, monkeypatch):
+    monkeypatch.setattr(
+        mocked_s3_storage,
+        "stat",
+        lambda key: (_ for _ in ()).throw(FileNotFoundError(f"No object at key: {key}")),
+    )
+    with pytest.raises(MinioError, match="could not be verified"):
+        mocked_s3_storage.write_bytes("bronze/student/all/data.parquet", b"hello world")
+
+
+def test_write_bytes_raises_minio_error_when_verified_size_mismatches(mocked_s3_storage, monkeypatch):
+    # Simulate put_object reporting success while what's actually stored
+    # (per a subsequent head_object) doesn't match what was sent.
+    monkeypatch.setattr(
+        mocked_s3_storage,
+        "stat",
+        lambda key: ObjectMetadata(
+            key=key, size_bytes=0, last_modified=datetime.now(timezone.utc), bucket="test-bronze-bucket"
+        ),
+    )
+    with pytest.raises(MinioError, match="does not match what was written"):
+        mocked_s3_storage.write_bytes("bronze/student/all/data.parquet", b"hello world")
+
+
+def test_write_bytes_succeeds_when_verification_confirms_matching_size(mocked_s3_storage):
+    # The happy path still works end-to-end against moto's real put_object +
+    # head_object -- the verification step doesn't just always raise.
+    mocked_s3_storage.write_bytes("bronze/student/all/data.parquet", b"hello world")
+    assert mocked_s3_storage.read_bytes("bronze/student/all/data.parquet") == b"hello world"
 
 
 # ---------------------------------------------------------------------------
