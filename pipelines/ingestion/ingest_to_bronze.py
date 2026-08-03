@@ -320,10 +320,20 @@ def ingest_all(
 
 
 if __name__ == "__main__":
-    summary = ingest_all()
-    counts: Dict[str, int] = {}
-    for r in summary:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    print("Bronze ingestion complete:")
-    for status, count in counts.items():
-        print(f"  {status}: {count}")
+    import uuid as _uuid
+    from pipelines.common.logging_config import PipelineStageLogger, get_logger
+
+    _logger = get_logger(__name__)
+    _run_id = str(_uuid.uuid4())
+    with PipelineStageLogger(_run_id, stage="ingestion") as stage_log:
+        summary = ingest_all()
+        counts: Dict[str, int] = {}
+        for r in summary:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        stage_log.rows_processed = sum(
+            r.get("rows", 0) for r in summary if r.get("status") == "SUCCESS"
+        )
+        stage_log.rows_rejected = sum(
+            count for status, count in counts.items() if status == "FAILED"
+        )
+        _logger.info("Bronze ingestion complete: %s", counts, extra={"pipeline_extra": counts})

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from dagster import AssetExecutionContext, MetadataValue, asset
 from pipelines.common.errors import PipelineError, classify_exception
+from pipelines.common.logging_config import PipelineStageLogger
 from models.forecasting.deploy_forecast import deploy_forecasts
 from models.forecasting.train_prophet import evaluate_all_series, train_final_models, write_evaluation_report
 from pipelines.common.metadata import get_connection, record_pipeline_run
@@ -43,8 +44,17 @@ def _track_asset_run(context: AssetExecutionContext, stage: str, handler):
         records_processed=0,
         error="",
     )
+    # Task 63: one STARTED + one terminal SUCCESS/FAILED JSON log line
+    # per stage, correlated by run_id, in addition to the DuckDB row
+    # below -- see pipelines/common/logging_config.py's module docstring
+    # for why both exist.
+    stage_log = PipelineStageLogger(run_id=context.run_id, stage=stage)
     try:
-        result = handler()
+        with stage_log:
+            result = handler()
+            stage_log.rows_processed = (
+                result["records_processed"] if isinstance(result, dict) else 0
+            )
         completed_at = datetime.now(timezone.utc)
         record_pipeline_run(
             conn,
@@ -53,7 +63,7 @@ def _track_asset_run(context: AssetExecutionContext, stage: str, handler):
             status="SUCCESS",
             started_at=started_at,
             completed_at=completed_at,
-            records_processed=result["records_processed"] if isinstance(result, dict) else 0,
+            records_processed=stage_log.rows_processed,
             error="",
         )
         return result

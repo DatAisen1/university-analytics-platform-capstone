@@ -269,7 +269,12 @@ def build_all_facts(
 
 
 if __name__ == "__main__":
-    counts = build_all_facts()
-    print("Gold fact build complete:")
-    for name, count in counts.items():
-        print(f"  {name}: {count} rows")
+    import uuid as _uuid
+    from pipelines.common.logging_config import PipelineStageLogger, get_logger
+
+    _logger = get_logger(__name__)
+    _run_id = str(_uuid.uuid4())
+    with PipelineStageLogger(_run_id, stage="gold") as stage_log:
+        counts = build_all_facts()
+        stage_log.rows_processed = sum(counts.values())
+        _logger.info("Gold fact build complete: %s", counts, extra={"pipeline_extra": counts})
