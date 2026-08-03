@@ -20,12 +20,14 @@ noise rates (this day's tests).
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import yaml
 
+from pipelines.common.academic_periods import SEMESTER_LABELS, academic_year_start_year
 from pipelines.common.config import ConfigError
 from data_generator.rules.noise_injection import (
     apply_status_casing_noise,
@@ -93,19 +95,33 @@ def apply_noise_to_student_master(path: Path, config: dict, rng: np.random.Gener
 # Enrollment partition noise
 # ---------------------------------------------------------------------------
 
+_ACADEMIC_YEAR_DIR_RE = re.compile(r"^\d{4}-\d{4}$")
+
+
 def _discover_enrollment_partitions(output_dir: Path) -> List[Tuple[int, int, Path]]:
     """Find every {academic_year}/{semester}/enrollment.csv under
-    output_dir, sorted chronologically."""
+    output_dir, sorted chronologically.
+
+    Directory names follow the real generator convention from
+    data_generator/generators/generate_progression.py: academic_year is a
+    label like "2021-2022" and semester is one of the shared labels from
+    pipelines.common.academic_periods.SEMESTER_LABELS.
+    """
     partitions = []
-    for year_dir in output_dir.iterdir():
-        if not year_dir.is_dir() or not year_dir.name.isdigit():
+    for year_dir in sorted(output_dir.iterdir()):
+        if not year_dir.is_dir() or not _ACADEMIC_YEAR_DIR_RE.match(year_dir.name):
             continue
-        for sem_dir in year_dir.iterdir():
-            if not sem_dir.is_dir() or not sem_dir.name.isdigit():
+        academic_year = academic_year_start_year(year_dir.name)
+
+        for sem_dir in sorted(year_dir.iterdir()):
+            if not sem_dir.is_dir() or sem_dir.name not in SEMESTER_LABELS:
                 continue
+            semester_number = SEMESTER_LABELS.index(sem_dir.name) + 1
+
             enrollment_file = sem_dir / "enrollment.csv"
             if enrollment_file.exists():
-                partitions.append((int(year_dir.name), int(sem_dir.name), enrollment_file))
+                partitions.append((academic_year, semester_number, enrollment_file))
+
     partitions.sort(key=lambda p: (p[0], p[1]))
     return partitions
 

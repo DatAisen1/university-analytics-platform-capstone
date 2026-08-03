@@ -37,3 +37,7 @@ moto[s3]==5.2.2   # mocks S3/MinIO for testing pipelines.common.storage.S3Storag
 
 # --- Logging ---
 python-json-logger==2.0.7
+
+
+sqlalchemy==2.0.44        # used by pipelines/gold/load_gold_to_postgres.py
+alembic==1.14.0           # migration runner -- see migrations/ (Task 59)

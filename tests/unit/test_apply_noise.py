@@ -17,6 +17,7 @@ import csv
 import numpy as np
 import pytest
 
+from pipelines.common.academic_periods import SEMESTER_LABELS, academic_year_label
 from pipelines.common.config import ConfigError, load_default_reference_data
 from data_generator.rules.noise_injection import (
     apply_status_casing_noise,
@@ -186,7 +187,7 @@ def fixture_partitions(tmp_path):
     fieldnames = ["student_id", "academic_year", "semester_number", "college_id", "program_id",
                   "enrollment_status", "year_level", "units_enrolled", "is_new_enrollee"]
     for year, sem in [(2021, 1), (2021, 2), (2022, 1)]:
-        part_dir = output_dir / str(year) / str(sem)
+        part_dir = output_dir / academic_year_label(year) / SEMESTER_LABELS[sem - 1]
         part_dir.mkdir(parents=True)
         rows = [
             {"student_id": f"2021-{i:05d}", "academic_year": year, "semester_number": sem,
@@ -229,7 +230,7 @@ def test_apply_noise_to_enrollment_partitions_produces_duplicates_and_late_corre
 
     # First partition (2021-1) should end up with MORE rows than it started with,
     # since duplicates land in the SAME partition
-    with (fixture_partitions / "2021" / "1" / "enrollment.csv").open() as f:
+    with (fixture_partitions / "2021-2022" / "1st Semester" / "enrollment.csv").open() as f:
         final_2021_1_count = sum(1 for _ in csv.DictReader(f))
     assert final_2021_1_count >= 100
 

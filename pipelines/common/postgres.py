@@ -176,3 +176,29 @@ def replace_table_contents(engine, schema: str, table_name: str, df) -> None:
     with engine.begin() as conn:
         conn.execute(text(f'TRUNCATE TABLE {schema}."{table_name}"'))
     df.to_sql(table_name, engine, schema=schema, if_exists="append", index=False)
+
+
+if __name__ == "__main__":
+    import sys
+
+    # SERVICE_ROLES = ["pipeline_writer", "dbt_role", "dashboard_reader", "analyst_readonly"]
+    # -- keys here must match those exactly; bootstrap_roles() looks them up by name.
+    passwords = {
+        "pipeline_writer": os.environ.get("PIPELINE_WRITER_PASSWORD", ""),
+        "dbt_role": os.environ.get("DBT_ROLE_PASSWORD", ""),
+        "dashboard_reader": os.environ.get("DASHBOARD_READER_PASSWORD", ""),
+        "analyst_readonly": os.environ.get("ANALYST_READONLY_PASSWORD", ""),
+    }
+    missing = [role for role, pw in passwords.items() if not pw]
+    if missing:
+        print(
+            f"Missing password env var(s) for role(s): {missing}. "
+            f"Set PIPELINE_WRITER_PASSWORD / DBT_ROLE_PASSWORD / "
+            f"DASHBOARD_READER_PASSWORD / ANALYST_READONLY_PASSWORD "
+            f"(from .env) in this shell before running.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    applied = bootstrap_warehouse(passwords)
+    print(f"Warehouse bootstrap complete. Newly applied migrations: {applied}")

@@ -13,13 +13,13 @@ succeeded). Bronze/Silver/Gold idempotency checks must work even when
 Postgres isn't reachable (local dev, CI, first bootstrap), so this stays
 on DuckDB even though Postgres is fully online.
 """
-from pipelines.common.errors import PipelineError
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
+from pipelines.common.errors import PipelineError
 import duckdb
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
