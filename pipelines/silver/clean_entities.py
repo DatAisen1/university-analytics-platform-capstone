@@ -433,11 +433,24 @@ def clean_all(
 
 
 if __name__ == "__main__":
-    summary = clean_all()
-    print("Silver cleaning complete:")
-    for r in summary:
-        if r["status"] == "SUCCESS":
-            extra = f", unknown_status={r['unknown_status_count']}" if r.get("unknown_status_count") else ""
-            print(f"  {r['entity']}: {r['rows']} rows{extra}")
-        else:
-            print(f"  {r['entity']}: FAILED -- {r['error']}")
+    import uuid as _uuid
+    from pipelines.common.logging_config import PipelineStageLogger, get_logger
+
+    _logger = get_logger(__name__)
+    _run_id = str(_uuid.uuid4())
+    with PipelineStageLogger(_run_id, stage="silver") as stage_log:
+        summary = clean_all()
+        stage_log.rows_processed = sum(r.get("rows", 0) for r in summary if r["status"] == "SUCCESS")
+        stage_log.rows_rejected = sum(1 for r in summary if r["status"] != "SUCCESS")
+        for r in summary:
+            if r["status"] == "SUCCESS":
+                _logger.info(
+                    "%s cleaned: %s rows", r["entity"], r["rows"],
+                    extra={"pipeline_extra": {"entity": r["entity"], "rows": r["rows"],
+                                               "unknown_status_count": r.get("unknown_status_count", 0)}},
+                )
+            else:
+                _logger.error(
+                    "%s cleaning failed: %s", r["entity"], r["error"],
+                    extra={"pipeline_extra": {"entity": r["entity"], "error": r["error"]}},
+                )

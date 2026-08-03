@@ -264,10 +264,16 @@ def process_enrollment(
 
 
 if __name__ == "__main__":
-    summary = process_enrollment()
-    print("Silver validation + dedup complete (enrollment):")
-    for k, v in summary.items():
-        if k == "quarantine_rate":
-            print(f"  {k}: {v:.2%}")
-        else:
-            print(f"  {k}: {v}")
+    import uuid as _uuid
+    from pipelines.common.logging_config import PipelineStageLogger, get_logger
+
+    _logger = get_logger(__name__)
+    _run_id = str(_uuid.uuid4())
+    with PipelineStageLogger(_run_id, stage="validation", entity="enrollment") as stage_log:
+        summary = process_enrollment()
+        stage_log.rows_processed = summary["rows_out"]
+        stage_log.rows_rejected = summary["total_quarantined"]
+        _logger.info(
+            "Silver validation + dedup complete (enrollment): %s", summary,
+            extra={"pipeline_extra": summary},
+        )
