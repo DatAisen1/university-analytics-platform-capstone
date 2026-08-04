@@ -179,6 +179,7 @@ def simulate_student(
     while idx <= max_index:
         tenure_semesters += 1
         academic_year, semester_name = semester_index_to_label(idx)
+        semester_number = 1 if idx % 2 == 0 else 2
 
         # 1. Dropout check
         d_prob = dropout_probability(year_level, risk_score, stall_count, config)
@@ -188,6 +189,7 @@ def simulate_student(
                 "student_id": student_id,
                 "academic_year": academic_year,
                 "semester_name": semester_name,
+                "semester_number": semester_number,
                 "program_id": current_program.program_id,
                 "college_id": current_program.college_id,
                 "dropout_reason": reason,
@@ -195,6 +197,7 @@ def simulate_student(
             }
             enrollment_records.append({
                 "student_id": student_id, "academic_year": academic_year, "semester_name": semester_name,
+                "semester_number": semester_number,
                 "college_id": current_program.college_id, "program_id": current_program.program_id,
                 "enrollment_status": "DROPPED", "year_level": year_level,
                 "units_enrolled": 0, "is_new_enrollee": tenure_semesters == 1,
@@ -210,12 +213,14 @@ def simulate_student(
                     "student_id": student_id,
                     "academic_year": academic_year,
                     "semester_name": semester_name,
+                    "semester_number": semester_number,
                     "program_id": current_program.program_id,
                     "college_id": current_program.college_id,
                     "years_to_complete": round(tenure_semesters / 2, 1),
                 }
                 enrollment_records.append({
                     "student_id": student_id, "academic_year": academic_year, "semester_name": semester_name,
+                    "semester_number": semester_number,
                     "college_id": current_program.college_id, "program_id": current_program.program_id,
                     "enrollment_status": "GRADUATED", "year_level": year_level,
                     "units_enrolled": int(rng.integers(units_min, units_max + 1)),
@@ -231,6 +236,7 @@ def simulate_student(
                 "student_id": student_id,
                 "academic_year": academic_year,
                 "semester_name": semester_name,
+                "semester_number": semester_number,
                 "from_program_id": current_program.program_id,
                 "to_program_id": new_program.program_id,
             })
@@ -244,6 +250,7 @@ def simulate_student(
         # 4. Emit this semester's enrollment record (still enrolled)
         enrollment_records.append({
             "student_id": student_id, "academic_year": academic_year, "semester_name": semester_name,
+            "semester_number": semester_number,
             "college_id": current_program.college_id, "program_id": current_program.program_id,
             "enrollment_status": "ENROLLED", "year_level": year_level,
             "units_enrolled": int(rng.integers(units_min, units_max + 1)),
@@ -354,16 +361,16 @@ def generate_all_progression(
         outcome_by_cohort[cohort_key][result["final_status"]] += 1
 
     _write_partitions(output_dir, "enrollment", enrollment_by_partition,
-                       ["student_id", "academic_year", "semester_name", "college_id", "program_id",
+                       ["student_id", "academic_year", "semester_number", "college_id", "program_id",
                         "enrollment_status", "year_level", "units_enrolled", "is_new_enrollee"])
     _write_partitions(output_dir, "graduation", graduation_by_partition,
-                       ["student_id", "academic_year", "semester_name", "program_id", "college_id",
+                       ["student_id", "academic_year", "semester_number", "program_id", "college_id",
                         "years_to_complete"])
     _write_partitions(output_dir, "dropout", dropout_by_partition,
-                       ["student_id", "academic_year", "semester_name", "program_id", "college_id",
+                       ["student_id", "academic_year", "semester_number", "program_id", "college_id",
                         "dropout_reason", "semesters_completed_before_dropout"])
     _write_partitions(output_dir, "shifter", shifter_by_partition,
-                       ["student_id", "academic_year", "semester_name", "from_program_id", "to_program_id"])
+                       ["student_id", "academic_year", "semester_number", "from_program_id", "to_program_id"])
 
     total_students = len(students)
     reconciled = all(

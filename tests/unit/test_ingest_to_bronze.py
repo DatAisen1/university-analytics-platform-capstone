@@ -37,7 +37,7 @@ def fixture_output_dir(tmp_path):
     ])
     students.to_csv(output_dir / "student_master.csv", index=False)
 
-    partition_dir = output_dir / "2021" / "1"
+    partition_dir = output_dir / "2021-2022" / "1st Semester"
     partition_dir.mkdir(parents=True)
 
     enrollment = pd.DataFrame([

@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
+from pipelines.common.academic_periods import academic_year_label, semester_label_from_number
 from pipelines.common.errors import InvalidSchemaError
 from pipelines.common.config import ReferenceData, load_default_reference_data
 from pipelines.common.metadata import get_connection, has_successful_run, record_run, record_success_once
@@ -300,8 +301,10 @@ def ingest_all(
 
     for year, sem in OBSERVED_SEMESTERS:
         partition_key = f"academic_year={year}/semester={sem}"
+        year_dir = academic_year_label(year)
+        sem_dir = semester_label_from_number(sem)
         for entity in SEMESTER_SCOPED_ENTITIES:
-            source_path = data_generator_output / str(year) / str(sem) / f"{entity}.csv"
+            source_path = data_generator_output / year_dir / sem_dir / f"{entity}.csv"
             if not source_path.exists():
                 # Not every partition has every entity (e.g. an early
                 # semester may have zero graduations) -- that's a valid

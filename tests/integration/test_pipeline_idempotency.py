@@ -63,7 +63,7 @@ def _generator_output(tmp_path: Path) -> Path:
         "entry_college_id": "COE", "entry_program_id": "BSCS",
     }]).to_csv(out / "student_master.csv", index=False)
 
-    sem_dir = out / "2021" / "1"
+    sem_dir = out / "2021-2022" / "1st Semester"
     sem_dir.mkdir(parents=True)
     pd.DataFrame([{
         "student_id": "S0001", "academic_year": 2021, "semester_number": 1, "college_id": "COE",
@@ -130,8 +130,8 @@ class TestBronzeIngestionIdempotency:
         # First "partial" run: delete the enrollment source file so its
         # ingestion is skipped as NO_SOURCE_FILE, simulating a run that
         # completed for reference/student data but not for enrollment.
-        enrollment_csv = gen_output / "2021" / "1" / "enrollment.csv"
-        enrollment_csv.rename(gen_output / "2021" / "1" / "enrollment.csv.bak")
+        enrollment_csv = gen_output / "2021-2022" / "1st Semester" / "enrollment.csv"
+        enrollment_csv.rename(gen_output / "2021-2022" / "1st Semester" / "enrollment.csv.bak")
         first = ingest_all(
             storage=tmp_warehouse["bronze_storage"], meta_conn=tmp_warehouse["meta_conn"],
             data_generator_output=gen_output, reference=reference,
@@ -145,7 +145,7 @@ class TestBronzeIngestionIdempotency:
 
         # Restore the source and re-run: student/college/program must be
         # SKIPPED (already done), enrollment must now SUCCEED.
-        (gen_output / "2021" / "1" / "enrollment.csv.bak").rename(enrollment_csv)
+        (gen_output / "2021-2022" / "1st Semester" / "enrollment.csv.bak").rename(enrollment_csv)
         second = ingest_all(
             storage=tmp_warehouse["bronze_storage"], meta_conn=tmp_warehouse["meta_conn"],
             data_generator_output=gen_output, reference=reference,

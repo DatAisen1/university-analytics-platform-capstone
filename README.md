@@ -1,236 +1,745 @@
-# University Academic Analytics and Forecasting System
+University Academic Analytics and Forecasting System
 
-**NEUST Sumacab Campus — Institutional Success Rate Platform**
+NEUST Sumacab Campus — Institutional Success Rate Platform
 
-A production-inspired Data Engineering + Analytics + Forecasting platform built as a university capstone. It is architected the way a real enterprise data platform would be: layered (Bronze/Silver/Gold), governed, tested, and fully reproducible on free/open-source tools.
+A production-inspired Data Engineering + Analytics + Forecasting platform built as a university capstone. The platform uses a Bronze → Silver → Gold pipeline, PostgreSQL as the warehouse, MinIO for object storage, Dagster for orchestration, dbt for analytics engineering, and Prophet for forecasting.
 
-> This is a **data engineering project first**. The dashboard is the last mile, not the point.
+Important: This README is the operational runbook. Follow the commands in the order shown when you want to run the system from a clean environment and evaluate it.
 
-## Problem
+1. Architecture
 
-University administrators currently have no unified, historically-consistent way to answer multi-dimensional questions like *"is our institutional success rate improving, and where should we intervene?"* This platform turns semester-cadence registrar-style extracts into a governed warehouse, a defined Success Rate KPI, and short-horizon forecasts.
+Synthetic Source Data
+        ↓
+Ingestion
+        ↓
+Bronze
+        ↓
+Silver Cleaning
+        ↓
+Validation / Deduplication
+        ↓
+Gold Dimensions + Facts + KPI
+        ↓
+PostgreSQL Warehouse
+        ↓
+ML Forecast Features
+        ↓
+Prophet Training
+        ↓
+Walk-Forward Evaluation
+        ↓
+Model Registry / Promotion
+        ↓
+Next-Semester Forecast
 
-Full problem framing: [`docs/01_Project_Overview.md`](docs/01_Project_Overview.md)
+Docker runs the stateful services:
 
-## Architecture (at a glance)
+PostgreSQL — warehouse
 
-```
-Source → Ingestion (batch) → Bronze → Silver → Gold → Warehouse → Analytics (dbt) → ML (Prophet) → Dashboard → Decision Support
-```
+MinIO — S3-compatible object storage
 
-Full diagrams and rationale: [`docs/02_System_Architecture.md`](docs/02_System_Architecture.md)
+Dagster, dbt, and the Python pipeline run from the local Python environment.
 
-## Documentation
+2. Prerequisites
 
-All design decisions — with the *why*, not just the *what* — live in [`docs/`](docs/README.md). Start there for the complete blueprint: data modeling, medallion architecture, warehouse design, tech stack justification, the Faker generator, the Success Rate model, forecasting model selection, dashboard design, the 30-day roadmap, and best practices.
+Install:
 
-## Repository Structure
+Python 3.11+ recommended for the project environment
 
-```
-configs/        # colleges, programs, business rules — config, not code
-data_generator/ # synthetic data generator (renamed from faker/ to avoid colliding with the faker PyPI library)
-pipelines/      # ingestion, bronze, silver, gold transforms
-warehouse/      # DDL and migrations for the PostgreSQL warehouse
-dbt/            # analytics engineering: staging + marts
-analytics/      # ad-hoc SQL / exploratory outputs
-models/         # ML feature engineering + training code
-forecasting/    # forecast job entrypoints and artifacts
-dashboard/      # Superset/Streamlit assets
-notebooks/      # exploration only — never production logic
-scripts/        # one-off operational scripts (backfill, seed, etc.)
-tests/          # unit, integration, data_quality
-docker/         # docker-compose + Dockerfiles
-logs/           # structured pipeline logs
-docs/           # full project blueprint documentation
-```
+Docker Desktop
 
-## Status
+Git
 
-🚧 **Week 3 in progress (Day 20 of 30)** — real PostgreSQL warehouse with RBAC (Day 15), dbt staging + marts (Days 16–17), Dagster orchestration (Day 18), `gold.ml_forecast_features` (Day 19), and now Prophet forecasting with walk-forward validation (Day 20) — trained on 16 series, an honest 50%-beats-baseline result traced to its exact cause (100% on `enrollment_count`, 0% on `graduation_count`, tied directly to the Week 1 cohort-truncation limitation). 291 total pytest tests. See [`docs/12_Implementation_Roadmap.md`](docs/12_Implementation_Roadmap.md) for the day-by-day plan.
+PowerShell on Windows
 
-**A note on repository history:** the sandbox environment reset mid-Day-20, wiping `.git` and all installed tooling. Days 1–19 were fully reconstructed and re-verified (row counts, dbt tests, and the pytest suite all match their pre-reset state exactly) — see the first commit's message for the full account. Per-day commit granularity resumes from Day 20 onward.
+Python dependencies from requirements.txt
 
-**A note on this environment:** MinIO and Postgres run in Docker (Day 2), and this development environment has no Docker daemon. Every stage that would touch them is built against a real interface with a local-filesystem/DuckDB implementation used here (see `docs/03_Data_Engineering.md` §13), so the same code works once Postgres comes online in Week 3 — only the storage target changes.
+From the repository root:
 
-## Local Setup
-
-### 1. Python environment
-
-```bash
-git clone <repo-url>
-cd university-analytics-platform
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
 
-### 2. Environment variables
+If PowerShell blocks activation:
 
-```bash
-cp .env.example .env
-# then edit .env and set real local passwords for POSTGRES_PASSWORD / MINIO_ROOT_PASSWORD
-```
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
 
-`docker-compose.yml` now refuses to start Postgres or MinIO with a blank
-credential (`POSTGRES_USER`/`PASSWORD`/`DB`, `MINIO_ROOT_USER`/`PASSWORD`) --
-if `.env` is missing or incomplete, `docker compose up` fails immediately
-with an explicit "X is not set -- run cp .env.example .env..." error instead
-of silently starting with empty values. It also finds the repo-root `.env`
-correctly whether you run Compose from the repo root or from `docker/`.
+Confirm:
 
-### 3. Start Postgres + MinIO
+python --version
+docker --version
+docker compose version
 
-Recommended (works from any directory, always passes the right flags):
-```bash
+3. FIRST STEP — Create .env
+
+This fixes the POSTGRES_USER is missing error
+
+Do not start Docker before creating .env.
+
+From the repository root:
+
+Copy-Item .env.example .env
+
+Check that it exists:
+
+Test-Path .env
+
+It should return:
+
+True
+
+Open it:
+
+notepad .env
+
+At minimum, make sure these values are present:
+
+POSTGRES_USER=uap_admin
+POSTGRES_PASSWORD=change_me_locally
+POSTGRES_DB=university_analytics
+
+PIPELINE_WRITER_PASSWORD=change_me_locally_pw
+DBT_ROLE_PASSWORD=change_me_locally_dbt
+DASHBOARD_READER_PASSWORD=change_me_locally_dash
+ANALYST_READONLY_PASSWORD=change_me_locally_analyst
+
+MINIO_ROOT_USER=uap_minio_admin
+MINIO_ROOT_PASSWORD=change_me_locally_too
+
+For a local capstone environment, these values can remain local development passwords. Never commit .env to Git.
+
+4. IMPORTANT — Correct Docker Compose Command
+
+Do NOT use this by itself
+
+docker compose -f docker/docker-compose.yml
+
+That command does not start the system, and when Compose cannot find the repository-root .env, interpolation fails with:
+
+required variable POSTGRES_USER is missing a value
+POSTGRES_USER is not set
+
+Recommended command from the repository root
+
+Always use:
+
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+
+The order of --env-file and -f is not important, but both must be present for this project.
+
+Or, if make is installed:
+
 make up
-```
-Equivalent, if you'd rather not use `make`:
-```bash
-docker compose -f docker/docker-compose.yml --env-file .env up -d
-```
 
-### 4. Verify both services are up and healthy
+The Makefile already expands to the correct Compose command.
 
-A single `docker compose ps` is a point-in-time snapshot -- a container can
-sit at "starting" for a while before its healthcheck ever reports healthy
-(or never does, if something's wrong). For a clean-start verification that
-actually polls health status and fails loudly on a timeout:
-```bash
-make clean-start
-# runs: down -v -> up -d -> polls postgres/minio until "healthy" (or times
-# out with logs), then checks pg_isready and MinIO's liveness endpoint too
-```
-Dagster is intentionally not a docker-compose service in this project (it's
-run via the `dagster` CLI against the host Python environment) -- `make
-clean-start` verifies it instead by validating `orchestration/definitions.py`
-loads (`dagster definitions validate`), which is the CLI-orchestrator
-equivalent of a healthcheck here.
+5. Verify Docker
 
-Or just the snapshot, if you prefer:
-```bash
-docker compose -f docker/docker-compose.yml ps
-# both "postgres" and "minio" should show state "healthy", not just "running"
-```
+Check the containers:
 
-**Verify Postgres accepts connections:**
-```bash
-docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "SELECT version();"
-```
+docker compose --env-file .env -f docker/docker-compose.yml ps
 
-**Verify MinIO actually has data in it (not just that it's running):** a
-pipeline script exiting successfully is not proof its output exists in
-MinIO. Check through all three channels:
-```bash
-make verify-minio
-# Channel 1 (Python client, boto3): runs automatically, lists real object
-#   counts/sizes per bucket -- an empty bucket "exists" too, so this checks
-#   contents, not presence.
-# Channel 2 (CLI): prints the exact `mc ls ... --recursive` commands to
-#   cross-check against.
-# Channel 3 (Console): prints the http://localhost:9001 URL and what to
-#   click through to confirm the same objects visually.
-```
-Every MinIO/S3 write in the pipeline itself (`pipelines/common/storage.py`'s
-`S3Storage.write_bytes`) now also reads each object back immediately after
-writing it and raises before the pipeline can report success if that
-read-back fails or the size doesn't match -- so a silently-lost write is
-caught at write time, not discovered later by an audit.
+You want:
 
-### 5. Tear down (when needed)
+uap_postgres    ... healthy
+uap_minio       ... healthy
 
-```bash
-make down      # stop containers, keep data
-make down-v    # stop containers AND wipe volumes (clean slate)
-```
-Equivalent, without `make`:
-```bash
-docker compose -f docker/docker-compose.yml down        # stop containers, keep data
-docker compose -f docker/docker-compose.yml down -v      # stop containers AND wipe volumes (clean slate)
-```
+If they are still starting, wait a few seconds and run the command again.
 
-### 6. Generate the synthetic dataset
+Check PostgreSQL directly:
 
-Three stages, run in this exact order (each depends on the previous stage's output):
+docker exec -it uap_postgres pg_isready -U uap_admin -d university_analytics
 
-```bash
-python -m data_generator.generators.generate_students     # student_master.csv + internal risk profiles
-python -m data_generator.generators.generate_progression   # enrollment/graduation/dropout/shifter, per semester
-python -m data_generator.generators.apply_noise             # realistic messiness on top (typos, duplicates, late corrections)
-```
+Expected:
 
-Output lands in `data_generator/output/` (git-ignored — regenerate anytime; it's deterministic given the seeds in `data_generator/config/*.yaml`).
+accepting connections
 
-### 7. Run the Bronze → Silver → Gold pipeline
+Check MinIO:
 
-Run in this order (each stage reads the previous stage's output):
+Invoke-WebRequest http://localhost:9000/minio/health/live
 
-```bash
-python -m pipelines.ingestion.ingest_to_bronze   # lands raw data as Parquet, stamped with audit metadata
-python -m pipelines.silver.clean_entities         # normalizes text, resolves noisy enrollment_status
-python -m pipelines.silver.validate_and_dedupe     # dedupes enrollment, quarantines business-rule violations
-python -m pipelines.gold.build_dimensions          # dim_student (SCD2), dim_program, dim_college, dim_semester, ...
-python -m pipelines.gold.build_facts               # fact_enrollment, fact_graduation, fact_dropout, fact_shifter, fact_retention
-python -m pipelines.gold.build_kpi                 # fact_institution_kpi -- the weighted Success Rate composite
-```
+Expected HTTP status:
 
-Output lands in `warehouse/bronze_store/`, `warehouse/silver_store/`, `warehouse/gold_store/` (all git-ignored — local stand-ins for MinIO's buckets in this Docker-less environment; see the note in Status above). Pipeline run history is queryable in `warehouse/meta.duckdb`'s `pipeline_run_log` table.
+200
 
-### 8. Bootstrap the Postgres warehouse (roles, schemas, grants)
+Useful URLs:
 
-Requires the service role passwords from `.env` (`PIPELINE_WRITER_PASSWORD`, `DBT_ROLE_PASSWORD`, `DASHBOARD_READER_PASSWORD`, `ANALYST_READONLY_PASSWORD`):
+MinIO API: http://localhost:9000
 
-```bash
-python -m pipelines.common.postgres   # idempotent -- safe to re-run
-```
+MinIO Console: http://localhost:9001
 
-### 9. Load Gold into Postgres, build ML features, and run dbt
+MinIO login uses:
 
-```bash
-# After every Gold rebuild:
-python -m pipelines.gold.load_gold_to_postgres   # materializes Gold Parquet -> real gold.* tables
-python -m pipelines.gold.build_ml_features        # gold.ml_forecast_features -- lag/rolling/trend/seasonality features
+Username: value of MINIO_ROOT_USER
+Password: value of MINIO_ROOT_PASSWORD
 
-# dbt (staging views + marts over Gold, in dbt/models/staging/ and dbt/models/marts/):
-export DBT_PROFILES_DIR=dbt
-dbt deps --project-dir dbt      # installs dbt_utils (composite-key uniqueness tests)
+6. Recommended Clean Start
+
+When you want to completely rebuild the local Docker state:
+
+docker compose --env-file .env -f docker/docker-compose.yml down -v
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+
+Then:
+
+docker compose --env-file .env -f docker/docker-compose.yml ps
+
+down -v deletes the PostgreSQL and MinIO Docker volumes. Use it when you intentionally want a clean rebuild.
+
+7. Generate the Dataset
+
+Run these in this exact order.
+
+Step 1 — Generate students
+
+python -m data_generator.generators.generate_students
+
+Step 2 — Generate progression
+
+python -m data_generator.generators.generate_progression
+
+Step 3 — Apply realistic noise
+
+python -m data_generator.generators.apply_noise
+
+The generated files are placed under:
+
+data_generator/output/
+
+Confirm files exist:
+
+Get-ChildItem data_generator/output
+
+8. Bootstrap PostgreSQL
+
+Before running the warehouse portion of the pipeline, create the required database roles/schemas:
+
+python -m pipelines.common.postgres
+
+This is designed to be idempotent, so it can safely be run again.
+
+Verify PostgreSQL:
+
+docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "\dn"
+
+9. Run the Pipeline Manually
+
+Use this mode when you are debugging a particular stage or learning how each layer works.
+
+Bronze
+
+python -m pipelines.ingestion.ingest_to_bronze
+
+Silver cleaning
+
+python -m pipelines.silver.clean_entities
+
+Validation + deduplication
+
+python -m pipelines.silver.validate_and_dedupe
+
+Gold dimensions
+
+python -m pipelines.gold.build_dimensions
+
+Gold facts
+
+python -m pipelines.gold.build_facts
+
+Gold KPI
+
+python -m pipelines.gold.build_kpi
+
+Load Gold into PostgreSQL
+
+python -m pipelines.gold.load_gold_to_postgres
+
+Build ML features
+
+python -m pipelines.gold.build_ml_features
+
+10. Run dbt
+
+PowerShell uses $env: instead of Linux/macOS export.
+
+Set the dbt profile directory:
+
+$env:DBT_PROFILES_DIR = "dbt"
+
+Install dbt packages:
+
+dbt deps --project-dir dbt
+
+Run transformations:
+
 dbt run --project-dir dbt
+
+Run dbt tests:
+
 dbt test --project-dir dbt
 
-# dbt's auto-generated documentation site (lineage graph, column-level docs):
+Generate documentation:
+
 dbt docs generate --project-dir dbt
-dbt docs serve --project-dir dbt   # opens the site at http://localhost:8080
-```
 
-### 10. Run the full pipeline through Dagster orchestration
+Serve the documentation:
 
-Requires the same env vars as above (`PIPELINE_WRITER_PASSWORD`, `DBT_ROLE_PASSWORD`, `POSTGRES_*`):
+dbt docs serve --project-dir dbt
 
-```bash
-# Materialize every asset (Bronze -> Silver -> Gold -> dbt + ML features), in dependency order:
+Open:
+
+http://localhost:8080
+
+11. Recommended Full Pipeline — Dagster
+
+After:
+
+.env exists
+
+Docker is healthy
+
+Dataset has been generated
+
+PostgreSQL roles/schemas have been bootstrapped
+
+validate Dagster first:
+
+dagster definitions validate -f orchestration/definitions.py
+
+Expected result:
+
+Definitions ... successfully loaded
+
+Then run the entire asset graph:
+
 dagster asset materialize --select "*" -f orchestration/definitions.py
 
-# Or launch the Dagster UI to trigger runs and view the lineage graph interactively:
+The expected logical flow is:
+
+ingestion
+   ↓
+bronze
+   ↓
+silver
+   ↓
+validation
+   ↓
+gold
+   ↓
+warehouse
+   ↓
+features
+   ↓
+training
+   ↓
+evaluation
+   ↓
+forecast
+
+Important
+
+Dagster does not generate the synthetic dataset.
+
+Run these first:
+
+python -m data_generator.generators.generate_students
+python -m data_generator.generators.generate_progression
+python -m data_generator.generators.apply_noise
+
+Dagster also does not replace the separate dbt CLI commands in the current implementation. Run dbt separately when you want to build/test the dbt models.
+
+12. Run Dagster UI
+
+For an interactive view of the pipeline:
+
 dagster dev -f orchestration/definitions.py
-# then open http://localhost:3000
-```
 
-### 11. Train and evaluate the Prophet forecasting models
+Open:
 
-```bash
+http://localhost:3000
+
+From the UI you can inspect:
+
+asset lineage
+
+materialization runs
+
+logs
+
+failures
+
+metadata
+
+pipeline execution
+
+13. Train and Evaluate Prophet
+
+The direct forecasting entry point is:
+
 python -m models.forecasting.train_prophet
-```
 
-Writes trained model artifacts to `forecasting/artifacts/{college_id}_{metric}_prophet.pkl` and an evaluation report to `forecasting/artifacts/evaluation_report.{csv,md}` — see `docs/10_Forecasting.md` Section 5.1 for the real results and what they mean.
+This performs:
 
-### 12. Run the test suite
+Walk-forward validation
 
-```bash
+Prophet evaluation
+
+Naive baseline evaluation
+
+Historical-average baseline evaluation
+
+Model comparison
+
+Final model training on the full history
+
+Artifact generation
+
+The evaluation uses:
+
+MAE
+
+RMSE
+
+MAPE
+
+R²
+
+Prophet vs. naive baseline
+
+Prophet vs. historical-average baseline
+
+Outputs:
+
+forecasting/artifacts/evaluation_report.csv
+forecasting/artifacts/evaluation_report.md
+
+Trained models are written under:
+
+forecasting/artifacts/
+
+14. How to Evaluate the System
+
+Evaluation should happen at four levels, not only by checking whether the command exited successfully.
+
+A. Automated software tests
+
+Run:
+
 python -m pytest
-```
 
-## Tech Stack
+For a concise result:
 
-Python · DuckDB · PostgreSQL · MinIO · Dagster · dbt Core · Great Expectations · Apache Superset · Streamlit · Prophet · Docker
+python -m pytest -q
 
-## License
+For coverage:
 
-MIT — see [`LICENSE`](LICENSE).
+python -m pytest --cov=. --cov-report=term-missing
+
+You want the test suite to finish without failures.
+
+B. Pipeline evaluation
+
+After running the pipeline, inspect the generated layers:
+
+Get-ChildItem warehouse/bronze_store
+Get-ChildItem warehouse/silver_store
+Get-ChildItem warehouse/gold_store
+
+The important question is:
+
+Did data successfully move through Bronze → Silver → Gold?
+
+You should also verify that Silver has fewer invalid/duplicate records than the raw input and that Gold contains the dimensional/fact/KPI tables expected by the project.
+
+C. PostgreSQL warehouse evaluation
+
+Check schemas:
+
+docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "\dn"
+
+Check Gold tables:
+
+docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "\dt gold.*"
+
+Check KPI rows:
+
+docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "SELECT COUNT(*) FROM gold.fact_institution_kpi;"
+
+Check forecast rows:
+
+docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "SELECT COUNT(*) FROM gold.fact_forecast;"
+
+D. Forecast-model evaluation
+
+Open:
+
+forecasting/artifacts/evaluation_report.md
+
+Or inspect the CSV:
+
+Import-Csv forecasting/artifacts/evaluation_report.csv | Format-Table
+
+The most important column is:
+
+prophet_beats_best_baseline
+
+The model should not be considered successful merely because Prophet produced a forecast.
+
+A stronger evaluation asks:
+
+Does Prophet beat a simple baseline?
+
+For example:
+
+Prophet MAE       = 100
+Naive MAE         = 130
+Historical Avg    = 150
+
+Prophet wins in this case.
+
+But:
+
+Prophet MAE       = 150
+Naive MAE         = 100
+Historical Avg    = 120
+
+Prophet does not beat the baseline. That is a valid evaluation result and should be reported honestly.
+
+15. One Command Sequence to Run the Whole System
+
+Once your environment is already installed, this is the sequence to remember:
+
+# 1. Activate environment
+.\.venv\Scripts\Activate.ps1
+
+# 2. Make sure .env exists
+Copy-Item .env.example .env -ErrorAction SilentlyContinue
+
+# 3. Start infrastructure
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+
+# 4. Verify infrastructure
+docker compose --env-file .env -f docker/docker-compose.yml ps
+
+# 5. Generate data
+python -m data_generator.generators.generate_students
+python -m data_generator.generators.generate_progression
+python -m data_generator.generators.apply_noise
+
+# 6. Bootstrap warehouse
+python -m pipelines.common.postgres
+
+# 7. Validate Dagster
+dagster definitions validate -f orchestration/definitions.py
+
+# 8. Run complete pipeline
+dagster asset materialize --select "*" -f orchestration/definitions.py
+
+# 9. Run automated tests
+python -m pytest -q
+
+# 10. Inspect forecasting evaluation
+Get-Content forecasting/artifacts/evaluation_report.md
+
+If you want to run dbt explicitly, run the dbt section after PostgreSQL has been bootstrapped and the Gold layer has been loaded.
+
+16. Fast Recovery When Something Fails
+
+Error: POSTGRES_USER is not set
+
+Run:
+
+Test-Path .env
+
+If it returns False:
+
+Copy-Item .env.example .env
+
+Then start Compose with:
+
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+
+Error: PostgreSQL container is restarting
+
+Check logs:
+
+docker compose --env-file .env -f docker/docker-compose.yml logs postgres --tail 100
+
+Error: MinIO container is restarting
+
+Check:
+
+docker compose --env-file .env -f docker/docker-compose.yml logs minio --tail 100
+
+Error: Everything is corrupted and you want a clean rebuild
+
+docker compose --env-file .env -f docker/docker-compose.yml down -v
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+python -m pipelines.common.postgres
+
+Then regenerate data and rerun the pipeline.
+
+17. Important Current-Code Check Before Forecasting
+
+Before interpreting a Prophet failure as a data problem, inspect:
+
+models/forecasting/train_prophet.py
+
+The training DataFrame passed to Prophet must contain:
+
+ds
+y
+
+If your local copy contains:
+
+train.rename(columns={metric: "y_col"})
+
+but does not subsequently rename y_col to y, Prophet will reject the training DataFrame.
+
+The same check applies to:
+
+models/forecasting/deploy_forecast.py
+
+This is a code-level prerequisite, not a Docker problem.
+
+18. What Counts as a Successful Capstone Run?
+
+A complete successful run should demonstrate:
+
+Infrastructure
+
+PostgreSQL is healthy
+
+MinIO is healthy
+
+.env is loaded correctly
+
+Data Engineering
+
+Synthetic source data generated
+
+Bronze data created
+
+Silver cleaning completed
+
+Validation/deduplication completed
+
+Gold dimensions/facts/KPI created
+
+Warehouse
+
+PostgreSQL schemas exist
+
+Gold data is loaded
+
+ML feature table is populated
+
+Analytics Engineering
+
+dbt models run
+
+dbt tests pass
+
+Orchestration
+
+Dagster definitions validate
+
+Full asset graph materializes successfully
+
+Machine Learning
+
+Prophet models train
+
+Walk-forward evaluation completes
+
+Baselines are calculated
+
+Evaluation report is produced
+
+Forecast artifacts are generated
+
+Software Quality
+
+python -m pytest -q
+
+passes.
+
+19. Recommended Evaluation Evidence for the Capstone
+
+Keep these outputs as evidence for your documentation/presentation:
+
+1. docker compose ps
+2. Dagster asset graph
+3. Successful Dagster materialization
+4. Bronze/Silver/Gold row counts
+5. PostgreSQL Gold table screenshots/query results
+6. dbt test results
+7. pytest results
+8. forecasting/artifacts/evaluation_report.md
+9. Prophet vs baseline metrics
+10. generated forecast records
+
+The strongest capstone demonstration is:
+
+Raw data
+   ↓
+Bronze
+   ↓
+Silver
+   ↓
+Gold
+   ↓
+PostgreSQL
+   ↓
+Dagster orchestration
+   ↓
+ML features
+   ↓
+Prophet
+   ↓
+Walk-forward evaluation
+   ↓
+Baseline comparison
+   ↓
+Forecast
+
+This demonstrates the project as a Data Engineering + Analytics + ML system, rather than only a forecasting notebook.
+
+20. Useful Stop Commands
+
+Stop containers but keep data:
+
+docker compose --env-file .env -f docker/docker-compose.yml down
+
+Stop containers and delete Docker volumes:
+
+docker compose --env-file .env -f docker/docker-compose.yml down -v
+
+Follow Docker logs:
+
+docker compose --env-file .env -f docker/docker-compose.yml logs -f
+
+Check running services:
+
+docker compose --env-file .env -f docker/docker-compose.yml ps
+
+Project Documentation
+
+For deeper explanations, see:
+
+docs/
+
+Important documents include:
+
+docs/01_Project_Overview.md
+docs/02_System_Architecture.md
+docs/03_Data_Engineering.md
+docs/06_Data_Warehouse.md
+docs/10_Forecasting.md
+docs/12_Implementation_Roadmap.md
+
+License
+
+MIT — see LICENSE.
