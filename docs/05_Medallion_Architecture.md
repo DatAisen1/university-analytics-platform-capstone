@@ -111,7 +111,7 @@ Silver tables are still close to source shape (one table per entity) but fully t
 Business-ready, dimensionally modeled, aggregated, and ML-ready. This is the **last layer this repo owns** — everything downstream (Web Team, ML feature consumers, ad-hoc analytics) reads only from here, and only via `gold`/`marts`.
 
 ### Business-Ready Datasets
-The full star schema from `04_Data_Modeling.md`: `dim_student`, `dim_program`, `dim_college`, `dim_semester`, `dim_academic_year`, `dim_year_level`, `dim_calendar`, and all `fact_*` tables.
+The full star schema from `04_Data_Modeling.md`: `dim_student`, `dim_program`, `dim_college`, `dim_academic_period`, `dim_gender`, `dim_year_level`, `dim_calendar`, and all `fact_*` tables. (Task 23/24 collapsed the earlier `dim_semester`/`dim_academic_year` snowflake pair into the single denormalized `dim_academic_period` — see `04_Data_Modeling.md` §2/§3 for the rationale.)
 
 ### Aggregations
 `fact_institution_kpi` is a pre-aggregated fact — computed once per Gold run, not recomputed ad hoc by every consumer's query. This guarantees the Web Team's dashboard, dbt marts, and any analyst querying directly all see the *same* success rate number, because it's computed in exactly one place.

@@ -28,7 +28,7 @@ VALID_ROWS = {
     "enrollment": {"student_id": "2021-00001", "academic_year": 2021, "semester_number": 1,
                    "college_id": "COA", "program_id": "COA-BSARCH", "enrollment_status": "ENROLLED",
                    "year_level": 1, "units_enrolled": 18, "is_new_enrollee": True},
-    "graduation": {"student_id": "2021-00001", "academic_year": 2024, "semester_number": 2,
+    "graduation": {"student_id": "2021-00001", "academic_year": 2023, "semester_number": 2,
                    "program_id": "COA-BSARCH", "college_id": "COA", "years_to_complete": 4.0},
     "dropout": {"student_id": "2021-00001", "academic_year": 2022, "semester_number": 1,
                 "program_id": "COA-BSARCH", "college_id": "COA", "dropout_reason": "Financial",

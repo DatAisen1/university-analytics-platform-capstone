@@ -140,13 +140,13 @@ Work in short daily sessions (2–4 hrs realistic for a student balancing other 
 - **Documentation Task:** Document quarantine rate and business rules used.
 
 ### Day 12 — Gold: Dimension Tables
-- **Objectives:** Build `dim_student` (SCD2), `dim_program`, `dim_college`, `dim_semester`, `dim_academic_year`, `dim_year_level`, `dim_calendar`.
+- **Objectives:** Build `dim_student` (SCD2), `dim_program`, `dim_college`, `dim_academic_period`, `dim_gender`, `dim_year_level`, `dim_calendar`.
 - **Concepts:** Surrogate keys, SCD Type 1 vs Type 2 implementation.
-- **Dev Tasks:** Write Gold dimension-build SQL/Python (DuckDB → Postgres `MERGE`); implement SCD2 logic for `dim_student`; populate `dim_academic_year` with exactly 3 rows (`2021-2022`, `2022-2023`, `2023-2024`) and `dim_semester` with exactly 6 rows.
+- **Dev Tasks:** Write Gold dimension-build SQL/Python (DuckDB → Postgres `MERGE`); implement SCD2 logic for `dim_student`; populate `dim_academic_period` with exactly 6 rows (3 academic years × 2 semesters: `2021-2022` through `2023-2024`). (Task 23/24 replaced an earlier plan of a separate `dim_academic_year`/`dim_semester` snowflake pair with this single denormalized table — see `04_Data_Modeling.md` §2/§3.)
 - **Expected Output:** Populated dimension tables in `gold` schema.
 - **Git Commit:** `feat: build gold dimension tables with SCD logic`
 - **Deliverables:** `warehouse/ddl/gold_dimensions.sql`, load scripts.
-- **Validation Checklist:** [ ] Exactly one current row per student [ ] SCD2 history correctly closes prior rows on program change [ ] `dim_academic_year` has exactly 3 rows, `dim_semester` exactly 6.
+- **Validation Checklist:** [ ] Exactly one current row per student [ ] SCD2 history correctly closes prior rows on program change [ ] `dim_academic_period` has exactly 6 rows.
 - **Testing Checklist:** Test SCD2 logic against a student with a simulated shift event.
 - **Documentation Task:** Complete dimension section of `04_Data_Modeling.md`.
 

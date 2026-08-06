@@ -221,10 +221,14 @@ def test_academic_year_categorical_dtype_orders_years_chronologically():
     assert dtype.ordered is True
 
 
-def test_academic_year_categorical_dtype_defaults_to_four_year_observed_window():
+def test_academic_year_categorical_dtype_defaults_to_three_year_observed_window():
+    """P0.4: the canonical dataset horizon is 3 academic years (2021-2022
+    through 2023-2024), not the pre-migration 4-year window -- see
+    OBSERVED_START_YEAR's docstring and academic_year_categorical_dtype's
+    `years or range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)` default."""
     dtype = academic_year_categorical_dtype()
     assert list(dtype.categories) == [
-        academic_year_label(y) for y in range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 4)
+        academic_year_label(y) for y in range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)
     ]
 
 
