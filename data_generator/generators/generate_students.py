@@ -1,7 +1,7 @@
 """
 data_generator/generators/generate_students.py
 
-Generates the student master population for cohorts 2021-2024: one row per
+Generates the student master population for cohorts 2021-2023: one row per
 student, assigned a college/program, demographic attributes, and (in a
 separate, internal-only file) a latent risk score that later drives the
 Day 5 progression engine's dropout/graduation/shifter probabilities.

@@ -3,14 +3,20 @@ tests/unit/test_train_prophet.py
 
 Tests for models/forecasting/train_prophet.py: the pure date-mapping
 function, walk-forward fold structure, and (skipped if Postgres
-unreachable) full integration tests against the live warehouse --
-including the real, honest finding from Day 20's evaluation run locked
-in as a regression test: Prophet beats baseline on enrollment_count
-universally and loses on graduation_count universally, tracing directly
-to the cohort-truncation limitation disclosed since Week 1
-(docs/08_Faker_Data_Generator.md Section 10) -- graduation_count is 0
-for 7 of 8 semesters for most colleges, making a naive "predict 0"
-baseline structurally hard to beat.
+unreachable) full integration tests against the live warehouse.
+
+The integration tests below (test_prophet_beats_baseline_on_every_
+enrollment_series, test_prophet_does_not_beat_baseline_on_graduation_
+series, and related row-count assertions) lock in Day 20's original
+evaluation-run findings, which were measured against the old, incorrect
+8-semester dataset. Per docs/10_Forecasting.md's STALE note, those
+findings are EXPECTED to still qualitatively hold under the corrected
+6-semester model (graduation_count series remain structurally hard to
+beat with a trend model, since most cohorts haven't reached graduation
+eligibility within the observed window) but the specific row counts and
+per-series pass/fail pattern below have not been re-verified against
+real output regenerated under the 6-semester grain -- see REMAINING
+ISSUES in this task's execution report.
 """
 
 import os
@@ -43,8 +49,8 @@ def test_semester_to_date_matches_dim_calendar_convention():
     assert semester_to_date(2024, 2)[:4] == "2024"
 
 
-def test_exactly_four_walk_forward_test_points():
-    assert TEST_PERIOD_ORDINALS == [5, 6, 7, 8]
+def test_exactly_three_walk_forward_test_points():
+    assert TEST_PERIOD_ORDINALS == [3, 4, 5]
 
 
 def test_fit_prophet_wraps_training_failures_in_model_training_error(monkeypatch):

@@ -15,7 +15,6 @@ cohort_sizes:
   2021: 1800
   2022: 1900
   2023: 2000
-  2024: 2100
 
 # Share of each cohort assigned to each college. Must sum to 1.0 and every
 # key must exist in configs/colleges.yaml (cross-validated at load time).

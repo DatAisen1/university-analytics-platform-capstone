@@ -43,11 +43,11 @@ _STR = pd.StringDtype()
 _INT = pd.Int64Dtype()
 _BOOL = pd.BooleanDtype()
 
-# Data-driven, not magic numbers: mirrors this project's actual 4-cohort
+# Data-driven, not magic numbers: mirrors this project's actual 3-cohort
 # generation window (data_generator/config/volumes.yaml) and the 2
 # semesters/year modeled everywhere else (pipelines/common/
 # academic_periods.SEMESTER_LABELS).
-OBSERVED_ACADEMIC_YEARS = [2021, 2022, 2023, 2024]
+OBSERVED_ACADEMIC_YEARS = [2021, 2022, 2023]
 VALID_SEMESTER_NUMBERS = [1, 2]
 VALID_GENDERS = ["Male", "Female"]
 VALID_ADMISSION_TYPES = ["Freshman", "Transferee"]

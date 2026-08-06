@@ -24,10 +24,10 @@ One entry point, `deploy_forecasts(engine)`, does this for every
 
 KNOWN LIMITATION (not worked around here -- see
 warehouse/ddl/008_forecast_registry.sql's module docstring for the full
-explanation): the forecasted target period (period_ordinal 9, i.e.
-2025-1) has no corresponding row in gold.dim_academic_period, because
+explanation): the forecasted target period (period_ordinal 6, i.e.
+2024-1) has no corresponding row in gold.dim_academic_period, because
 that dimension is built only from the closed, observed
-ACADEMIC_YEARS = [2021, 2022, 2023, 2024] range
+ACADEMIC_YEARS = [2021, 2022, 2023] range
 (pipelines/gold/build_dimensions.py). gold.fact_forecast therefore
 stores target_academic_year/target_semester_number/target_period_ordinal
 as plain columns rather than an academic_period_key FK.

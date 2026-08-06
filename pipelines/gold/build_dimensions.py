@@ -84,7 +84,7 @@ DEFAULT_GOLD_STORAGE_PATH = _REPO_ROOT / "warehouse" / "gold_store"
 
 STAGE = "gold_build_dimensions"
 
-ACADEMIC_YEARS = [2021, 2022, 2023, 2024]
+ACADEMIC_YEARS = [2021, 2022, 2023]
 
 # Governed year_level domain and labels. Only years 1-6 are observed in
 # Silver today, but the dimension is intentionally built to cover the full
@@ -167,7 +167,8 @@ def academic_period_key_lookup(dim_academic_period: pd.DataFrame) -> Dict[tuple,
 
 
 def build_dim_calendar(dim_academic_period: pd.DataFrame) -> pd.DataFrame:
-    """A day-grain calendar dimension for 2021-01-01 through 2024-12-31.
+    """A day-grain calendar dimension spanning the observed ACADEMIC_YEARS
+    range (2021-01-01 through the last observed year's 12-31).
 
     Disclosed simplification: the project brief specifies academic years
     and two semesters per year, but never literal semester start/end
@@ -177,9 +178,16 @@ def build_dim_calendar(dim_academic_period: pd.DataFrame) -> pd.DataFrame:
     calendar year (not a "2021-2022"-style split year). A real
     deployment would replace this assumption with the institution's
     actual registrar calendar.
+
+    The end year is derived from ACADEMIC_YEARS rather than hardcoded --
+    a hardcoded "2024-12-31" here silently drifted out of sync with
+    ACADEMIC_YEARS once the latter was corrected from 4 years to 3
+    (P0.4), which would have raised a KeyError on academic_period_key
+    lookups for the now-nonexistent 2024 dates.
     """
     period_key_by = academic_period_key_lookup(dim_academic_period)
-    dates = pd.date_range("2021-01-01", "2024-12-31", freq="D")
+    last_year = max(ACADEMIC_YEARS)
+    dates = pd.date_range("2021-01-01", f"{last_year}-12-31", freq="D")
 
     rows = []
     for date_key, d in enumerate(dates, start=1):
