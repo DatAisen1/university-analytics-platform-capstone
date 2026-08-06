@@ -28,65 +28,76 @@ Using **Postgres schemas** (not just naming prefixes) to separate Bronze/Silver/
 ## 3. Physical Table Definitions (Representative DDL)
 
 ```sql
--- gold.dim_semester
-CREATE TABLE gold.dim_semester (
-    semester_key      SERIAL PRIMARY KEY,
-    semester_id        VARCHAR(12) NOT NULL UNIQUE,   -- e.g. '2022-2023-1'
-    semester_number     SMALLINT NOT NULL CHECK (semester_number IN (1,2)),
-    academic_year_key   INT NOT NULL REFERENCES gold.dim_academic_year(academic_year_key)
+-- gold.dim_academic_period
+-- Task 23/24 Gold Modeling Fix: replaces the old snowflaked
+-- dim_academic_year <- dim_semester pair (see 04_Data_Modeling.md §2/§3
+-- for why) with one denormalized row per (academic_year, semester_number).
+-- Exactly 6 rows in scope: 2021-2022 through 2023-2024, 2 semesters each.
+CREATE TABLE gold.dim_academic_period (
+    academic_period_key SMALLINT PRIMARY KEY,
+    academic_year        SMALLINT NOT NULL,
+    semester_number       SMALLINT NOT NULL CHECK (semester_number IN (1, 2)),
+    year_label            VARCHAR(16) NOT NULL,          -- e.g. '2022-2023'
+    semester_label         VARCHAR(16) NOT NULL,          -- '1st Semester' / '2nd Semester'
+    period_label           VARCHAR(32) NOT NULL,          -- combined, e.g. '2022-2023 · 1st Semester'
+    period_ordinal         SMALLINT NOT NULL,              -- 0-based chronological ordinal
+    UNIQUE (academic_year, semester_number),
+    UNIQUE (period_ordinal)
 );
 
--- gold.dim_academic_year
-CREATE TABLE gold.dim_academic_year (
-    academic_year_key SERIAL PRIMARY KEY,
-    year_label         VARCHAR(9) NOT NULL UNIQUE,     -- e.g. '2022-2023', never a bare single year
-    start_calendar_year SMALLINT NOT NULL,
-    end_calendar_year   SMALLINT NOT NULL
+-- gold.dim_gender / gold.dim_year_level
+-- Also new in Task 23/24: gender and year_level promoted from raw
+-- fact/dimension values into first-class governed dimensions.
+CREATE TABLE gold.dim_gender (
+    gender_key    SMALLINT PRIMARY KEY,
+    gender_code   VARCHAR(16) NOT NULL UNIQUE,
+    gender_label  VARCHAR(16) NOT NULL
 );
--- Exactly 3 rows in scope: 2021-2022, 2022-2023, 2023-2024.
+
+CREATE TABLE gold.dim_year_level (
+    year_level_key    SMALLINT PRIMARY KEY,
+    year_level        SMALLINT NOT NULL UNIQUE,
+    year_level_label  VARCHAR(32) NOT NULL
+);
 
 -- gold.dim_student (SCD Type 2)
 CREATE TABLE gold.dim_student (
-    student_key     SERIAL PRIMARY KEY,
-    student_id      VARCHAR(20) NOT NULL,
-    gender          VARCHAR(10),
-    birth_year      INT,
-    home_province   VARCHAR(100),
-    admission_type  VARCHAR(20),
-    _valid_from_semester_key INT REFERENCES gold.dim_semester(semester_key),
-    _valid_to_semester_key   INT REFERENCES gold.dim_semester(semester_key),
-    _is_current     BOOLEAN NOT NULL DEFAULT TRUE,
-    _batch_id       UUID NOT NULL,
-    _loaded_at      TIMESTAMP NOT NULL DEFAULT now()
+    student_key             INTEGER PRIMARY KEY,
+    student_id              VARCHAR(16) NOT NULL,
+    gender_key               SMALLINT NOT NULL REFERENCES gold.dim_gender(gender_key),
+    birth_year                SMALLINT NOT NULL,
+    home_province             VARCHAR(64) NOT NULL,
+    admission_type            VARCHAR(16) NOT NULL,
+    college_key               SMALLINT NOT NULL REFERENCES gold.dim_college(college_key),
+    program_key               INTEGER NOT NULL REFERENCES gold.dim_program(program_key),
+    _valid_from_period_key     SMALLINT NOT NULL REFERENCES gold.dim_academic_period(academic_period_key),
+    _valid_to_period_key       SMALLINT REFERENCES gold.dim_academic_period(academic_period_key),
+    _is_current                BOOLEAN NOT NULL
 );
-CREATE UNIQUE INDEX ux_dim_student_current
+CREATE UNIQUE INDEX ux_dim_student_one_current
     ON gold.dim_student (student_id) WHERE _is_current;
 
 -- gold.fact_enrollment
 CREATE TABLE gold.fact_enrollment (
-    fact_id          BIGSERIAL PRIMARY KEY,
-    student_key      INT NOT NULL REFERENCES gold.dim_student(student_key),
-    program_key      INT NOT NULL REFERENCES gold.dim_program(program_key),
-    college_key      INT NOT NULL REFERENCES gold.dim_college(college_key),
-    semester_key      INT NOT NULL REFERENCES gold.dim_semester(semester_key),
-    academic_year_key INT NOT NULL REFERENCES gold.dim_academic_year(academic_year_key),
-    year_level_key    INT NOT NULL REFERENCES gold.dim_year_level(year_level_key),
-    enrollment_status VARCHAR(20) NOT NULL,
-    units_enrolled    SMALLINT,
-    is_new_enrollee   BOOLEAN,
-    _batch_id         UUID NOT NULL,
-    _loaded_at        TIMESTAMP NOT NULL DEFAULT now()
+    student_key            INTEGER NOT NULL REFERENCES gold.dim_student(student_key),
+    program_key             INTEGER NOT NULL REFERENCES gold.dim_program(program_key),
+    college_key             SMALLINT NOT NULL REFERENCES gold.dim_college(college_key),
+    academic_period_key      SMALLINT NOT NULL REFERENCES gold.dim_academic_period(academic_period_key),
+    enrollment_status         VARCHAR(16) NOT NULL,
+    year_level_key             SMALLINT NOT NULL REFERENCES gold.dim_year_level(year_level_key),
+    units_enrolled              SMALLINT NOT NULL,
+    is_new_enrollee              BOOLEAN NOT NULL
 );
-CREATE INDEX ix_fact_enrollment_college_sem ON gold.fact_enrollment (college_key, semester_key);
+CREATE INDEX ix_fact_enrollment_period ON gold.fact_enrollment (college_key, academic_period_key);
 ```
 
-Every fact table follows the same pattern: surrogate FK columns + audit columns + one composite index matching the dominant query shape (`college × semester`), which any downstream consumer — including the Web Team — will use most often.
+This is a direct summary of the authoritative DDL in `warehouse/ddl/003_gold_star_schema.sql` — see that file for the remaining fact tables (`fact_graduation`, `fact_dropout`, `fact_shifter`, `fact_retention`, `fact_institution_kpi`), each of which follows the same pattern: surrogate FK columns + one composite index matching the dominant query shape (`college × academic_period`), which any downstream consumer — including the Web Team — will use most often. `dim_college`, `dim_program`, and `dim_calendar` are omitted above for brevity; see `04_Data_Modeling.md` §3 for their full column lists.
 
 ## 4. Refresh Strategy
 
-- **Dimensions**: `MERGE`/upsert on each Gold run; `dim_student` inserts a new SCD2 row + closes the old one (`_valid_to_semester_key`, `_is_current = false`) only when a tracked attribute (program, status-relevant fields) changes.
+- **Dimensions**: `MERGE`/upsert on each Gold run; `dim_student` inserts a new SCD2 row + closes the old one (`_valid_to_period_key`, `_is_current = false`) only when a tracked attribute (program, status-relevant fields) changes.
 - **Facts**: at this data volume, Gold facts are fully rebuilt from Silver on every run rather than incrementally merged (see `04_Data_Modeling.md` §9 for why) — this sidesteps a class of incremental-merge bugs and stays idempotent by construction (same input → same output, every time).
-- **`fact_institution_kpi`**: fully recomputed per affected `(college, semester)` on every Gold run — cheap enough at this volume (48 rows total) to just recompute rather than incrementally maintain.
+- **`fact_institution_kpi`**: fully recomputed per affected `(college, academic_period)` on every Gold run — cheap enough at this volume (8 colleges × 6 periods = 48 rows total) to just recompute rather than incrementally maintain.
 
 ## 5. Access & Security Model
 

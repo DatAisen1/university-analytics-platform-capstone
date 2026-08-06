@@ -97,10 +97,12 @@ def test_dbt_test_passes_for_marts():
 def test_mart_executive_summary_has_one_row_per_semester():
     conn = get_role_connection("dbt_role", DBT_ROLE_PASSWORD, env=TEST_ENV)
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*), COUNT(DISTINCT semester_key) FROM marts.mart_executive_summary")
+        cur.execute("SELECT COUNT(*), COUNT(DISTINCT academic_period_key) FROM marts.mart_executive_summary")
         total, distinct = cur.fetchone()
     conn.close()
-    assert total == distinct == 8
+    # 6-period canonical grain (3 academic years x 2 semesters) -- see
+    # pipelines/gold/build_dimensions.py's ACADEMIC_YEARS / P0.4.
+    assert total == distinct == 6
 
 
 @pytest.mark.skipif(not _marts_exist(), reason="Marts must be built first -- run `dbt run` before this test")
