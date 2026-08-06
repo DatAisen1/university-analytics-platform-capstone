@@ -118,7 +118,7 @@ def academic_year_categorical_dtype(years: list[int] | None = None) -> pd.Catego
         df["academic_year"] = df["academic_year"].astype(academic_year_categorical_dtype())
         df = df.sort_values("academic_year")   # now chronological, not alphabetical
     """
-    years = years or range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 4)
+    years = years or range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)
     ordered_labels = [academic_year_label(y) for y in sorted(set(years))]
     return pd.CategoricalDtype(categories=ordered_labels, ordered=True)
 

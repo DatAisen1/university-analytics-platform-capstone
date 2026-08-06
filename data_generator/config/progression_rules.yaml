@@ -11,9 +11,9 @@ random_seed: 43   # deliberately different from generate_students.py's seed (42)
                    # student generation and progression simulation are independent
                    # random processes and shouldn't share a seed/stream.
 
-# Semester index 0 = 2021-1 ... index 7 = 2024-2 (inclusive). See
+# Semester index 0 = 2021-1 ... index 5 = 2023-2 (inclusive). See
 # generate_progression.semester_index_to_label for the mapping.
-max_semester_index: 7
+max_semester_index: 5
 
 dropout:
   # Base per-semester dropout probability by year level -- highest in

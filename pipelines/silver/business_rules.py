@@ -78,9 +78,9 @@ DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
 STAGE = "silver_business_validation"
 
 # Data-driven, not magic numbers: this project's generator only ever
-# produces 4 cohorts (2021-2024) and 2 semesters/year -- see
+# produces 3 cohorts (2021-2023) and 2 semesters/year -- see
 # data_generator/config/volumes.yaml and academic_periods.SEMESTER_LABELS.
-DEFAULT_OBSERVED_ACADEMIC_YEARS: Tuple[int, ...] = tuple(range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 4))
+DEFAULT_OBSERVED_ACADEMIC_YEARS: Tuple[int, ...] = tuple(range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3))
 DEFAULT_VALID_SEMESTER_NUMBERS: Tuple[int, ...] = tuple(range(1, len(SEMESTER_LABELS) + 1))
 
 # Which count-like columns to non-negativity-check per entity (Task 22's

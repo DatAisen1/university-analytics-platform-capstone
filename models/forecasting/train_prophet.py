@@ -2,17 +2,24 @@
 models/forecasting/train_prophet.py
 
 Trains a Prophet model per (college, target metric), evaluates it via
-walk-forward validation against the exact 4 folds docs/10_Forecasting.md
-Section 5 specifies, compares it against the two required baselines
-(naive, historical-average), and refits a final model on the full
-history for each series (used by Day 21 to actually forecast the next
-semester).
+walk-forward validation against the exact 3 folds docs/10_Forecasting.md
+Section 5 specifies for the canonical 6-semester (2021-2022 through
+2023-2024) dataset horizon, compares it against the two required
+baselines (naive, historical-average), and refits a final model on the
+full history for each series (used by Day 21 to actually forecast the
+next semester).
 
-Walk-forward folds (docs/10_Forecasting.md, period_ordinal terms):
-  Fold 1: train period_ordinal 1-4, test period_ordinal 5 (2023-1)
-  Fold 2: train period_ordinal 1-5, test period_ordinal 6 (2023-2)
-  Fold 3: train period_ordinal 1-6, test period_ordinal 7 (2024-1)
-  Fold 4: train period_ordinal 1-7, test period_ordinal 8 (2024-2)
+Only 3 walk-forward folds are available under the 6-period grain (down
+from 4 under a previous, incorrect 8-semester draft) -- a direct,
+disclosed consequence of the academic-calendar fix (docs/10_Forecasting.md
+Section 5). With this few folds, per-fold metrics are a point estimate
+with wide, disclosed uncertainty, not a precise accuracy figure.
+
+Walk-forward folds (docs/10_Forecasting.md, period_ordinal terms --
+period_ordinal is 0-based; see pipelines/gold/build_dimensions.py):
+  Fold 1: train period_ordinal 0-2, test period_ordinal 3 (2022-2)
+  Fold 2: train period_ordinal 0-3, test period_ordinal 4 (2023-1)
+  Fold 3: train period_ordinal 0-4, test period_ordinal 5 (2023-2)
 
 Each fold trains ONLY on data strictly before its test point -- the
 walk-forward discipline docs/10_Forecasting.md requires specifically
@@ -45,7 +52,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ARTIFACTS_DIR = _REPO_ROOT / "forecasting" / "artifacts"
 
 TARGET_METRICS = ["enrollment_count", "graduation_count"]
-TEST_PERIOD_ORDINALS = [5, 6, 7, 8]  # the 4 walk-forward test points, per the fold table above
+TEST_PERIOD_ORDINALS = [3, 4, 5]  # the 3 walk-forward test points, per the fold table above
 
 
 def semester_to_date(academic_year: int, semester_number: int) -> str:
@@ -81,8 +88,8 @@ def load_series(engine) -> pd.DataFrame:
 def fit_prophet(train_df: pd.DataFrame):
     """Fit a Prophet model on a training series. yearly_seasonality is
     enabled with a LOW fourier_order (2, vs. Prophet's default 10) --
-    with as few as 4-7 semesters (2-3.5 years) of training data in the
-    earliest folds, a high-order Fourier fit would overfit the tiny
+    with as few as 3 semesters (1.5 years) of training data in the
+    earliest fold, a high-order Fourier fit would overfit the tiny
     amount of seasonal signal available. Weekly/daily seasonality are
     disabled outright: this is semester-grain data, and fitting
     sub-semester seasonality to it is fitting noise by definition.
@@ -108,7 +115,7 @@ def predict_point(model, ds: str) -> float:
 def walk_forward_evaluate(
     college_series: pd.DataFrame, metric: str
 ) -> Dict[str, Dict[str, List[float]]]:
-    """Run all 4 walk-forward folds for one (college, metric) series.
+    """Run all 3 walk-forward folds for one (college, metric) series.
     Returns {model_name: {"actual": [...], "predicted": [...]}} with one
     entry per fold, for prophet/naive/historical_avg.
     """
@@ -198,9 +205,9 @@ def evaluate_all_series(engine) -> pd.DataFrame:
 
 
 def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> List[str]:
-    """Refit one Prophet model per (college, metric) on the FULL 8-semester
+    """Refit one Prophet model per (college, metric) on the FULL 6-semester
     history (not a walk-forward fold) and pickle it -- these are the
-    models Day 21 loads to actually forecast semester 9 (2025-1)."""
+    models Day 21 loads to actually forecast period_ordinal 6 (2024-1)."""
     df = load_series(engine)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []

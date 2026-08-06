@@ -2,7 +2,7 @@
 data_generator/generators/generate_progression.py
 
 Simulates each student's semester-by-semester journey from their entry
-semester through 2024-2 (or until a terminal outcome), producing:
+semester through 2023-2 (or until a terminal outcome), producing:
   - enrollment records   (one row per student per semester enrolled)
   - graduation events
   - dropout events
@@ -14,23 +14,25 @@ per semester, not one giant all-history file.
 
 IMPORTANT KNOWN LIMITATION (surfaced here deliberately, not buried):
 Every student's simulation STARTS at their cohort's entry semester within
-the observed 2021-2024 window. There is no population of students who
-already enrolled *before* 2021 and are continuing into the window (e.g.
+the observed 2021-2023 window (3 academic years, 6 semesters -- see
+docs/01_Project_Overview.md Section 4). There is no population of students
+who already enrolled *before* 2021 and are continuing into the window (e.g.
 real 2021-1 seniors who started in 2018). That means:
   - 2021-1's simulated population is 100% brand-new entrants -- no
     continuing 2nd/3rd/4th/5th-year students exist on day one, which a
     real university obviously would have.
   - 4-year programs can only produce a graduate if a student entered in
-    the 2021 cohort AND survives to exactly their 8th semester (2024-2) --
+    the 2021 cohort AND survives to exactly their 6th semester (2023-2) --
     the single last semester in the observed window. 5-year programs
     (Architecture, Engineering) cannot produce ANY natural graduate within
-    this window at all, since even the 2021 cohort only reaches 8 semesters
-    of tenure by 2024-2, short of the 10 semesters a 5-year program needs.
+    this window at all, since even the 2021 cohort only reaches 6 semesters
+    of tenure by 2023-2, short of the 10 semesters a 5-year program needs.
   - This means observed graduation counts/rates will be far lower, and far
-    more concentrated in 2024-2, than the ~1,500-2,500 events estimated in
-    docs/08_Faker_Data_Generator.md Section 7 -- that estimate implicitly
-    assumed an ongoing institution with students at every year level
-    already present in 2021-1, which this generator does not simulate.
+    more concentrated in 2023-2, than the ~1,500-2,500 events estimated in
+    an earlier draft of docs/08_Faker_Data_Generator.md Section 7 -- that
+    estimate implicitly assumed an ongoing institution with students at
+    every year level already present in 2021-1, which this generator does
+    not simulate.
 See docs/14_Future_Improvements.md for the proposed fix (simulating
 "legacy" pre-2021 entry cohorts as unobserved backstory) and why it's
 deferred rather than silently patched into the probability model to hit
@@ -179,6 +181,7 @@ def simulate_student(
     while idx <= max_index:
         tenure_semesters += 1
         academic_year, semester_name = semester_index_to_label(idx)
+        semester_number = 1 if idx % 2 == 0 else 2
 
         # 1. Dropout check
         d_prob = dropout_probability(year_level, risk_score, stall_count, config)
@@ -188,6 +191,7 @@ def simulate_student(
                 "student_id": student_id,
                 "academic_year": academic_year,
                 "semester_name": semester_name,
+                "semester_number": semester_number,
                 "program_id": current_program.program_id,
                 "college_id": current_program.college_id,
                 "dropout_reason": reason,
@@ -195,6 +199,7 @@ def simulate_student(
             }
             enrollment_records.append({
                 "student_id": student_id, "academic_year": academic_year, "semester_name": semester_name,
+                "semester_number": semester_number,
                 "college_id": current_program.college_id, "program_id": current_program.program_id,
                 "enrollment_status": "DROPPED", "year_level": year_level,
                 "units_enrolled": 0, "is_new_enrollee": tenure_semesters == 1,
@@ -210,12 +215,14 @@ def simulate_student(
                     "student_id": student_id,
                     "academic_year": academic_year,
                     "semester_name": semester_name,
+                    "semester_number": semester_number,
                     "program_id": current_program.program_id,
                     "college_id": current_program.college_id,
                     "years_to_complete": round(tenure_semesters / 2, 1),
                 }
                 enrollment_records.append({
                     "student_id": student_id, "academic_year": academic_year, "semester_name": semester_name,
+                    "semester_number": semester_number,
                     "college_id": current_program.college_id, "program_id": current_program.program_id,
                     "enrollment_status": "GRADUATED", "year_level": year_level,
                     "units_enrolled": int(rng.integers(units_min, units_max + 1)),
@@ -231,6 +238,7 @@ def simulate_student(
                 "student_id": student_id,
                 "academic_year": academic_year,
                 "semester_name": semester_name,
+                "semester_number": semester_number,
                 "from_program_id": current_program.program_id,
                 "to_program_id": new_program.program_id,
             })
@@ -244,6 +252,7 @@ def simulate_student(
         # 4. Emit this semester's enrollment record (still enrolled)
         enrollment_records.append({
             "student_id": student_id, "academic_year": academic_year, "semester_name": semester_name,
+            "semester_number": semester_number,
             "college_id": current_program.college_id, "program_id": current_program.program_id,
             "enrollment_status": "ENROLLED", "year_level": year_level,
             "units_enrolled": int(rng.integers(units_min, units_max + 1)),
@@ -354,16 +363,16 @@ def generate_all_progression(
         outcome_by_cohort[cohort_key][result["final_status"]] += 1
 
     _write_partitions(output_dir, "enrollment", enrollment_by_partition,
-                       ["student_id", "academic_year", "semester_name", "college_id", "program_id",
+                       ["student_id", "academic_year", "semester_number", "college_id", "program_id",
                         "enrollment_status", "year_level", "units_enrolled", "is_new_enrollee"])
     _write_partitions(output_dir, "graduation", graduation_by_partition,
-                       ["student_id", "academic_year", "semester_name", "program_id", "college_id",
+                       ["student_id", "academic_year", "semester_number", "program_id", "college_id",
                         "years_to_complete"])
     _write_partitions(output_dir, "dropout", dropout_by_partition,
-                       ["student_id", "academic_year", "semester_name", "program_id", "college_id",
+                       ["student_id", "academic_year", "semester_number", "program_id", "college_id",
                         "dropout_reason", "semesters_completed_before_dropout"])
     _write_partitions(output_dir, "shifter", shifter_by_partition,
-                       ["student_id", "academic_year", "semester_name", "from_program_id", "to_program_id"])
+                       ["student_id", "academic_year", "semester_number", "from_program_id", "to_program_id"])
 
     total_students = len(students)
     reconciled = all(
