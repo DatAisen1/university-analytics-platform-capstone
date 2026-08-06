@@ -10,16 +10,25 @@
 version: 2
 
 models:
-  - name: stg_dim_academic_year
+  - name: stg_dim_academic_period
     columns:
-      - name: academic_year_key
+      - name: academic_period_key
+        tests: [not_null, unique]
+      - name: period_ordinal
         tests: [not_null, unique]
 
-  - name: stg_dim_semester
+  - name: stg_dim_gender
     columns:
-      - name: semester_key
+      - name: gender_key
         tests: [not_null, unique]
-      - name: semester_id
+      - name: gender_code
+        tests: [not_null, unique]
+
+  - name: stg_dim_year_level
+    columns:
+      - name: year_level_key
+        tests: [not_null, unique]
+      - name: year_level
         tests: [not_null, unique]
 
   - name: stg_dim_calendar
@@ -71,13 +80,13 @@ models:
               arguments:
                 to: ref('stg_dim_college')
                 field: college_key
-      - name: semester_key
+      - name: academic_period_key
         tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_semester')
-                field: semester_key
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
       - name: enrollment_status
         tests:
           - accepted_values:
@@ -121,5 +130,5 @@ models:
     columns:
       - name: college_key
         tests: [not_null]
-      - name: semester_key
+      - name: academic_period_key
         tests: [not_null]

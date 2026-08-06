@@ -14,26 +14,39 @@
 -- admissions/application event stream exists in Bronze/Silver) -- both
 -- are emitted as NULL, never fabricated. See UNSOURCED_METRICS in
 -- pipelines/common/canonical_schema.py.
+--
+-- academic_year/semester output as canonical_schema.py's contract
+-- requires ("2021-2022" / "1st Semester"), sourced from
+-- dim_academic_period's year_label/semester_label -- NOT the raw
+-- academic_year int/semester_number columns. gender and year_level are
+-- decoded from dim_student.gender_key / fact_enrollment.year_level_key
+-- via dim_gender / dim_year_level -- both dimensions Gold has carried
+-- since Task 23/24 but that dbt never sourced, since this mart's
+-- previous version read `stu.gender` / `fe.year_level` columns that
+-- don't exist on the Gold model at all (a pre-existing break, not
+-- something P0.4 introduced).
 
 with enrollment_base as (
     select
-        sem.academic_year_id as academic_year,
-        sem.semester_name as semester,
+        per.year_label as academic_year,
+        per.semester_label as semester,
         col.college_name as college,
         prog.program_name as program,
-        stu.gender,
-        {{ year_level_label_sql('fe.year_level', 'prog.nominal_duration_years') }} as year_level,
+        gen.gender_label as gender,
+        {{ year_level_label_sql('yl.year_level', 'prog.nominal_duration_years') }} as year_level,
         fe.student_key,
         fe.college_key,
         fe.program_key,
-        fe.semester_key,
+        fe.academic_period_key,
         fe.is_new_enrollee,
         stu.admission_type
     from {{ ref('stg_fact_enrollment') }} fe
-    join {{ ref('stg_dim_semester') }} sem on fe.semester_key = sem.semester_key
+    join {{ ref('stg_dim_academic_period') }} per on fe.academic_period_key = per.academic_period_key
     join {{ ref('stg_dim_college') }} col on fe.college_key = col.college_key
     join {{ ref('stg_dim_program') }} prog on fe.program_key = prog.program_key
     join {{ ref('stg_dim_student') }} stu on fe.student_key = stu.student_key
+    join {{ ref('stg_dim_gender') }} gen on stu.gender_key = gen.gender_key
+    join {{ ref('stg_dim_year_level') }} yl on fe.year_level_key = yl.year_level_key
 ),
 
 enrolled_agg as (
@@ -46,45 +59,48 @@ enrolled_agg as (
 
 graduates_agg as (
     select
-        sem.academic_year_id as academic_year,
-        sem.semester_name as semester,
+        per.year_label as academic_year,
+        per.semester_label as semester,
         col.college_name as college,
         prog.program_name as program,
-        stu.gender,
+        gen.gender_label as gender,
         count(*) as graduates
     from {{ ref('stg_fact_graduation') }} fg
-    join {{ ref('stg_dim_semester') }} sem on fg.semester_key = sem.semester_key
+    join {{ ref('stg_dim_academic_period') }} per on fg.academic_period_key = per.academic_period_key
     join {{ ref('stg_dim_college') }} col on fg.college_key = col.college_key
     join {{ ref('stg_dim_program') }} prog on fg.program_key = prog.program_key
     join {{ ref('stg_dim_student') }} stu on fg.student_key = stu.student_key
+    join {{ ref('stg_dim_gender') }} gen on stu.gender_key = gen.gender_key
     group by 1, 2, 3, 4, 5
 ),
 
 dropouts_agg as (
     select
-        sem.academic_year_id as academic_year, sem.semester_name as semester,
+        per.year_label as academic_year, per.semester_label as semester,
         col.college_name as college, prog.program_name as program,
-        stu.gender,
+        gen.gender_label as gender,
         count(*) as dropouts
     from {{ ref('stg_fact_dropout') }} fd
-    join {{ ref('stg_dim_semester') }} sem on fd.semester_key = sem.semester_key
+    join {{ ref('stg_dim_academic_period') }} per on fd.academic_period_key = per.academic_period_key
     join {{ ref('stg_dim_college') }} col on fd.college_key = col.college_key
     join {{ ref('stg_dim_program') }} prog on fd.program_key = prog.program_key
     join {{ ref('stg_dim_student') }} stu on fd.student_key = stu.student_key
+    join {{ ref('stg_dim_gender') }} gen on stu.gender_key = gen.gender_key
     group by 1, 2, 3, 4, 5
 ),
 
 shifters_agg as (
     select
-        sem.academic_year_id as academic_year, sem.semester_name as semester,
+        per.year_label as academic_year, per.semester_label as semester,
         col.college_name as college, prog.program_name as program,
-        stu.gender,
+        gen.gender_label as gender,
         count(*) as shifters
     from {{ ref('stg_fact_shifter') }} fs
-    join {{ ref('stg_dim_semester') }} sem on fs.semester_key = sem.semester_key
+    join {{ ref('stg_dim_academic_period') }} per on fs.academic_period_key = per.academic_period_key
     join {{ ref('stg_dim_program') }} prog on fs.from_program_key = prog.program_key
     join {{ ref('stg_dim_college') }} col on prog.college_key = col.college_key
     join {{ ref('stg_dim_student') }} stu on fs.student_key = stu.student_key
+    join {{ ref('stg_dim_gender') }} gen on stu.gender_key = gen.gender_key
     group by 1, 2, 3, 4, 5
 )
 

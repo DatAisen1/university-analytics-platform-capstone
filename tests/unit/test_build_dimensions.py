@@ -5,71 +5,102 @@ Tests for pipelines/gold/build_dimensions.py. The SCD2 tests deliberately
 include the entry-semester-shift edge case as an explicit regression test
 -- this was a REAL bug found while running Day 12 against the actual
 dataset (35 students shifted in their very first observed semester,
-producing a nonsensical NULL _valid_to_semester_key on their "closed" row,
+producing a nonsensical NULL _valid_to_period_key on their "closed" row,
 since there's no valid prior semester before their entry to close it at).
+
+Updated for the Task 23/24 Gold Modeling Fix (dim_academic_year +
+dim_semester snowflake pair collapsed into one denormalized
+dim_academic_period table) and P0.4's correction of the dataset horizon
+from 4 cohorts / 8 periods to the canonical 3 cohorts / 6 periods
+(2021-2022 through 2023-2024). See build_dimensions.py's module docstring
+for the full rationale.
 """
 
 import pandas as pd
 import pytest
 
 from pipelines.gold.build_dimensions import (
-    build_dim_academic_year,
+    academic_period_key_lookup,
+    build_dim_academic_period,
     build_dim_calendar,
     build_dim_college,
     build_dim_program,
-    build_dim_semester,
+    build_dim_gender,
     build_dim_student,
-    semester_key_lookup,
-    semester_ordinal,
+    period_ordinal,
 )
 
 
 @pytest.fixture
-def dim_academic_year():
-    return build_dim_academic_year()
+def dim_academic_period():
+    return build_dim_academic_period()
 
 
 @pytest.fixture
-def dim_semester(dim_academic_year):
-    return build_dim_semester(dim_academic_year)
+def dim_gender():
+    return build_dim_gender()
+
+
+@pytest.fixture
+def dim_college():
+    college_df = pd.DataFrame([
+        {"college_id": "COA", "college_name": "College of Architecture"},
+        {"college_id": "CICT", "college_name": "College of ICT"},
+    ])
+    return build_dim_college(college_df)
+
+
+@pytest.fixture
+def dim_program(dim_college):
+    program_df = pd.DataFrame([
+        {"program_id": "COA-BSARCH", "program_name": "BS Architecture", "college_id": "COA",
+         "program_level": "Bachelor", "nominal_duration_years": 5.0},
+        {"program_id": "CICT-BSIT-WEB", "program_name": "BSIT Web", "college_id": "CICT",
+         "program_level": "Bachelor", "nominal_duration_years": 4.0},
+    ])
+    return build_dim_program(program_df, dim_college)
 
 
 # ---------------------------------------------------------------------------
-# semester_ordinal
+# period_ordinal
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("year,sem,expected", [(2021, 1, 0), (2021, 2, 1), (2022, 1, 2), (2024, 2, 7)])
-def test_semester_ordinal(year, sem, expected):
-    assert semester_ordinal(year, sem) == expected
+@pytest.mark.parametrize("year,sem,expected", [(2021, 1, 0), (2021, 2, 1), (2022, 1, 2), (2023, 2, 5)])
+def test_period_ordinal(year, sem, expected):
+    assert period_ordinal(year, sem) == expected
 
 
 # ---------------------------------------------------------------------------
-# dim_academic_year / dim_semester / dim_calendar
+# dim_academic_period / dim_calendar
 # ---------------------------------------------------------------------------
 
-def test_dim_academic_year_has_four_years(dim_academic_year):
-    assert len(dim_academic_year) == 4
-    assert list(dim_academic_year["start_year"]) == [2021, 2022, 2023, 2024]
-
-
-def test_dim_semester_has_eight_rows(dim_semester):
-    assert len(dim_semester) == 8
-    assert set(dim_semester["semester_id"]) == {
-        "2021-1", "2021-2", "2022-1", "2022-2", "2023-1", "2023-2", "2024-1", "2024-2",
+def test_dim_academic_period_has_six_rows_across_three_years(dim_academic_period):
+    """Canonical horizon (P0.4): 3 academic years x 2 semesters = 6 periods,
+    not the old, incorrect 4-cohort / 8-period model."""
+    assert len(dim_academic_period) == 6
+    assert list(dim_academic_period["academic_year"].unique()) == [2021, 2022, 2023]
+    assert set(dim_academic_period["period_label"]) == {
+        "2021-2022 \u00b7 1st Semester", "2021-2022 \u00b7 2nd Semester",
+        "2022-2023 \u00b7 1st Semester", "2022-2023 \u00b7 2nd Semester",
+        "2023-2024 \u00b7 1st Semester", "2023-2024 \u00b7 2nd Semester",
     }
 
 
-def test_dim_calendar_spans_full_range(dim_semester):
-    calendar = build_dim_calendar(dim_semester)
+def test_dim_academic_period_key_equals_ordinal_plus_one(dim_academic_period):
+    assert list(dim_academic_period["academic_period_key"]) == list(dim_academic_period["period_ordinal"] + 1)
+
+
+def test_dim_calendar_spans_full_range(dim_academic_period):
+    calendar = build_dim_calendar(dim_academic_period)
     assert calendar["full_date"].min().isoformat() == "2021-01-01"
-    assert calendar["full_date"].max().isoformat() == "2024-12-31"
-    assert len(calendar) == 1461  # 4 years including one leap year (2024)
+    assert calendar["full_date"].max().isoformat() == "2023-12-31"
+    assert len(calendar) == 1095  # 3 years, no leap year in 2021-2023
 
 
-def test_dim_calendar_every_row_has_valid_semester_key(dim_semester):
-    calendar = build_dim_calendar(dim_semester)
-    valid_keys = set(dim_semester["semester_key"])
-    assert calendar["semester_key"].isin(valid_keys).all()
+def test_dim_calendar_every_row_has_valid_period_key(dim_academic_period):
+    calendar = build_dim_calendar(dim_academic_period)
+    valid_keys = set(dim_academic_period["academic_period_key"])
+    assert calendar["academic_period_key"].isin(valid_keys).all()
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +132,11 @@ def test_dim_program_resolves_college_key():
 # dim_student -- SCD2
 # ---------------------------------------------------------------------------
 
-def test_student_with_no_shift_gets_exactly_one_open_row(dim_semester):
+def _program_key(dim_program, program_id):
+    return dim_program.loc[dim_program["program_id"] == program_id, "program_key"].iloc[0]
+
+
+def test_student_with_no_shift_gets_exactly_one_open_row(dim_academic_period, dim_gender, dim_college, dim_program):
     student_df = pd.DataFrame([{
         "student_id": "S1", "cohort_academic_year": 2021, "gender": "Male", "birth_year": 2003,
         "home_province": "Nueva Ecija", "admission_type": "Freshman",
@@ -110,14 +145,14 @@ def test_student_with_no_shift_gets_exactly_one_open_row(dim_semester):
     shifter_df = pd.DataFrame(columns=["student_id", "academic_year", "semester_number",
                                         "from_program_id", "to_program_id"])
 
-    dim_student = build_dim_student(student_df, shifter_df, dim_semester)
+    dim_student = build_dim_student(student_df, shifter_df, dim_academic_period, dim_gender, dim_college, dim_program)
     assert len(dim_student) == 1
     assert dim_student.iloc[0]["_is_current"] == True  # noqa: E712
-    assert pd.isna(dim_student.iloc[0]["_valid_to_semester_key"])
-    assert dim_student.iloc[0]["program_id"] == "COA-BSARCH"
+    assert pd.isna(dim_student.iloc[0]["_valid_to_period_key"])
+    assert dim_student.iloc[0]["program_key"] == _program_key(dim_program, "COA-BSARCH")
 
 
-def test_student_with_mid_history_shift_gets_two_rows_properly_closed(dim_semester):
+def test_student_with_mid_history_shift_gets_two_rows_properly_closed(dim_academic_period, dim_gender, dim_college, dim_program):
     """The normal case: a student enters 2021-1, shifts in 2021-2 -- the
     first row must close at 2021-1 (the semester BEFORE the shift), and
     the second row must be open (_is_current=True)."""
@@ -131,30 +166,30 @@ def test_student_with_mid_history_shift_gets_two_rows_properly_closed(dim_semest
         "from_program_id": "CICT-BSIT-WEB", "to_program_id": "COA-BSARCH",
     }])
 
-    dim_student = build_dim_student(student_df, shifter_df, dim_semester)
+    dim_student = build_dim_student(student_df, shifter_df, dim_academic_period, dim_gender, dim_college, dim_program)
     assert len(dim_student) == 2
 
-    sem_key = semester_key_lookup(dim_semester)
+    period_key = academic_period_key_lookup(dim_academic_period)
     old_row = dim_student[~dim_student["_is_current"]].iloc[0]
     new_row = dim_student[dim_student["_is_current"]].iloc[0]
 
-    assert old_row["program_id"] == "CICT-BSIT-WEB"
-    assert old_row["_valid_from_semester_key"] == sem_key[(2021, 1)]
-    assert old_row["_valid_to_semester_key"] == sem_key[(2021, 1)]  # closes at the semester BEFORE the shift
+    assert old_row["program_key"] == _program_key(dim_program, "CICT-BSIT-WEB")
+    assert old_row["_valid_from_period_key"] == period_key[(2021, 1)]
+    assert old_row["_valid_to_period_key"] == period_key[(2021, 1)]  # closes at the semester BEFORE the shift
 
-    assert new_row["program_id"] == "COA-BSARCH"
-    assert new_row["_valid_from_semester_key"] == sem_key[(2021, 2)]
-    assert pd.isna(new_row["_valid_to_semester_key"])
+    assert new_row["program_key"] == _program_key(dim_program, "COA-BSARCH")
+    assert new_row["_valid_from_period_key"] == period_key[(2021, 2)]
+    assert pd.isna(new_row["_valid_to_period_key"])
 
 
-def test_student_who_shifts_in_their_entry_semester_gets_exactly_one_row(dim_semester):
+def test_student_who_shifts_in_their_entry_semester_gets_exactly_one_row(dim_academic_period, dim_gender, dim_college, dim_program):
     """REGRESSION TEST for the real Day 12 bug: a shift occurring in the
     student's very first observed semester has no valid prior semester to
     close a row at (Day 5's simulate_student applies the shift check
     before emitting that semester's own enrollment record, so the very
     first record already reflects the post-shift program). This must
     produce exactly ONE row -- open, with the POST-shift program -- not a
-    doomed 'closed' row with a nonsensical null _valid_to_semester_key."""
+    doomed 'closed' row with a nonsensical null _valid_to_period_key."""
     student_df = pd.DataFrame([{
         "student_id": "S1", "cohort_academic_year": 2021, "gender": "Male", "birth_year": 2003,
         "home_province": "Nueva Ecija", "admission_type": "Freshman",
@@ -165,16 +200,16 @@ def test_student_who_shifts_in_their_entry_semester_gets_exactly_one_row(dim_sem
         "from_program_id": "CICT-BSIT-WEB", "to_program_id": "COA-BSARCH",
     }])
 
-    dim_student = build_dim_student(student_df, shifter_df, dim_semester)
+    dim_student = build_dim_student(student_df, shifter_df, dim_academic_period, dim_gender, dim_college, dim_program)
 
     assert len(dim_student) == 1
     row = dim_student.iloc[0]
     assert row["_is_current"] == True  # noqa: E712
-    assert pd.isna(row["_valid_to_semester_key"])
-    assert row["program_id"] == "COA-BSARCH"  # the POST-shift program, carried from the start
+    assert pd.isna(row["_valid_to_period_key"])
+    assert row["program_key"] == _program_key(dim_program, "COA-BSARCH")  # the POST-shift program, carried from the start
 
 
-def test_dim_student_exactly_one_current_row_per_student_at_scale(dim_semester):
+def test_dim_student_exactly_one_current_row_per_student_at_scale(dim_academic_period, dim_gender, dim_college, dim_program):
     """A broader property test: across many students with a mix of no
     shifts, mid-history shifts, and entry-semester shifts, every student
     must end up with EXACTLY one current row -- the Day 12 validation
@@ -202,11 +237,11 @@ def test_dim_student_exactly_one_current_row_per_student_at_scale(dim_semester):
     student_df = pd.DataFrame(student_rows)
     shifter_df = pd.DataFrame(shifter_rows)
 
-    dim_student = build_dim_student(student_df, shifter_df, dim_semester)
+    dim_student = build_dim_student(student_df, shifter_df, dim_academic_period, dim_gender, dim_college, dim_program)
 
     current_counts = dim_student[dim_student["_is_current"]].groupby("student_id").size()
     assert (current_counts == 1).all()
     assert len(current_counts) == 20  # every student has exactly one current row
 
     non_current = dim_student[~dim_student["_is_current"]]
-    assert non_current["_valid_to_semester_key"].isna().sum() == 0  # no closed row ever left null
+    assert non_current["_valid_to_period_key"].isna().sum() == 0  # no closed row ever left null

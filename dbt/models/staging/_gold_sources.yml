@@ -15,9 +15,13 @@ sources:
   - name: gold
     schema: gold
     tables:
-      - name: dim_academic_year
-      - name: dim_semester
+      # Task 23/24 Gold Modeling Fix: the old dim_academic_year + dim_semester
+      # snowflake pair was collapsed into one denormalized dim_academic_period
+      # table (see pipelines/gold/build_dimensions.py's module docstring).
+      - name: dim_academic_period
       - name: dim_calendar
+      - name: dim_year_level
+      - name: dim_gender
       - name: dim_college
       - name: dim_program
       - name: dim_student
