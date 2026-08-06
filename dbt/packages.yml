@@ -1,8 +1,8 @@
 # dbt/packages.yml
 #
 # dbt_utils provides unique_combination_of_columns, needed for marts whose
-# grain is a composite key (college_key + semester_key, program_key +
-# semester_key) -- dbt's built-in `unique` test only covers a single
+# grain is a composite key (college_key + academic_period_key, program_key +
+# academic_period_key) -- dbt's built-in `unique` test only covers a single
 # column. Using the standard package here instead of hand-writing a
 # singular SQL test per composite-grain mart is the more idiomatic dbt
 # approach and avoids re-deriving the same "group by ... having count(*) > 1"

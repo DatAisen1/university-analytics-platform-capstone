@@ -5,20 +5,20 @@
 -- "trend line vs campus-wide average" requirement.
 with campus_avg as (
     select
-        semester_key,
+        academic_period_key,
         avg(success_rate) as campus_avg_success_rate
     from {{ ref('stg_fact_institution_kpi') }}
-    group by semester_key
+    group by academic_period_key
 )
 
 select
     kpi.college_key,
     col.college_id,
     col.college_name,
-    kpi.semester_key,
-    sem.semester_id,
-    sem.academic_year,
-    sem.semester_number,
+    kpi.academic_period_key,
+    per.period_label,
+    per.academic_year,
+    per.semester_number,
     kpi.enrollment_count,
     kpi.retention_rate,
     kpi.graduation_rate,
@@ -28,5 +28,5 @@ select
     kpi.success_rate - campus_avg.campus_avg_success_rate as success_rate_vs_campus_avg
 from {{ ref('stg_fact_institution_kpi') }} kpi
 join {{ ref('stg_dim_college') }} col on kpi.college_key = col.college_key
-join {{ ref('stg_dim_semester') }} sem on kpi.semester_key = sem.semester_key
-join campus_avg on kpi.semester_key = campus_avg.semester_key
+join {{ ref('stg_dim_academic_period') }} per on kpi.academic_period_key = per.academic_period_key
+join campus_avg on kpi.academic_period_key = campus_avg.academic_period_key

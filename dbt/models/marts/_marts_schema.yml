@@ -1,5 +1,4 @@
-# dbt/models/marts/_marts_schema.yml
-#
+#\\# dbt/models/marts/_marts_schema.yml
 # Every mart gets not_null on its grain-defining columns, uniqueness on
 # that grain (single-column `unique` where the grain is one column,
 # dbt_utils.unique_combination_of_columns where it's composite -- dbt's
@@ -21,19 +20,19 @@ models:
               arguments:
                 to: ref('stg_dim_college')
                 field: college_key
-      - name: semester_key
+      - name: academic_period_key
         tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_semester')
-                field: semester_key
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
       - name: success_rate
         tests: [not_null]
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
-            combination_of_columns: [college_key, semester_key]
+            combination_of_columns: [college_key, academic_period_key]
 
   - name: mart_college_performance
     description: "College Dashboard source: college KPIs plus the campus-wide average that semester, for benchmarking."
@@ -45,31 +44,31 @@ models:
               arguments:
                 to: ref('stg_dim_college')
                 field: college_key
-      - name: semester_key
+      - name: academic_period_key
         tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_semester')
-                field: semester_key
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
       - name: success_rate_vs_campus_avg
         tests: [not_null]
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
-            combination_of_columns: [college_key, semester_key]
+            combination_of_columns: [college_key, academic_period_key]
 
   - name: mart_executive_summary
     description: "Executive Dashboard source: one row per semester, campus-wide, enrollment-weighted rates."
     columns:
-      - name: semester_key
+      - name: academic_period_key
         tests:
           - not_null
           - unique
           - relationships:
               arguments:
-                to: ref('stg_dim_semester')
-                field: semester_key
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
       - name: total_enrollment
         tests: [not_null]
       - name: overall_success_rate
@@ -85,19 +84,19 @@ models:
               arguments:
                 to: ref('stg_dim_program')
                 field: program_key
-      - name: semester_key
+      - name: academic_period_key
         tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_semester')
-                field: semester_key
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
       - name: enrollment_count
         tests: [not_null]
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
-            combination_of_columns: [program_key, semester_key]
+            combination_of_columns: [program_key, academic_period_key]
 
   - name: mart_retention_risk
     description: "Decision-support mart: flags programs whose retention rate has declined for 2 consecutive semesters."
@@ -109,16 +108,16 @@ models:
               arguments:
                 to: ref('stg_dim_program')
                 field: program_key
-      - name: semester_key
+      - name: academic_period_key
         tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_dim_semester')
-                field: semester_key
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
       - name: is_declining_two_consecutive_semesters
         tests: [not_null]
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
-            combination_of_columns: [program_key, semester_key]
+            combination_of_columns: [program_key, academic_period_key]
