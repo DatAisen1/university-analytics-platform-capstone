@@ -97,15 +97,25 @@ def _column_not_null(cur, schema: str, table: str, column: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def test_migrations_are_all_applied():
+    """Alembic is now the sole migration authority (P0.6): its own
+    alembic_version table is the source of truth for what has been
+    applied, not the old meta.schema_migrations checksum table this
+    project used before Alembic replaced it (see
+    pipelines/common/migrations.py's module docstring). This test was
+    updated to check the authoritative mechanism rather than the
+    superseded one -- checking meta.schema_migrations would fail on
+    every correctly migrated database, since that table is no longer
+    created at all.
+    """
     conn = get_admin_connection(TEST_ENV)
     with conn.cursor() as cur:
-        cur.execute("SELECT version FROM meta.schema_migrations ORDER BY version")
-        applied = [row[0] for row in cur.fetchall()]
+        cur.execute("SELECT version_num FROM alembic_version")
+        current_head = cur.fetchone()[0]
     conn.close()
-    # Every migration file that ships in the repo must show up as applied.
-    assert "003" in applied, "003_gold_star_schema.sql was never applied -- the exact original bug"
-    assert "004" in applied
-    assert "005" in applied
+    # 0009 is the latest revision as of this migration chain; a lower
+    # head means the Silver/Gold-constraint/ML/forecast migrations
+    # (0004-0009) never ran -- the exact original bug this test guards.
+    assert current_head == "0009", f"expected Alembic head 0009, database is at {current_head!r}"
 
 
 def test_apply_migrations_twice_is_a_noop():
