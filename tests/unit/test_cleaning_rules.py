@@ -8,6 +8,7 @@ variants, but null, empty, and genuinely garbage input too.
 
 import pytest
 
+from pipelines.common.errors import InvalidSemesterError
 from pipelines.silver.cleaning_rules import (
     clean_text,
     make_categorical_normalizer,
@@ -141,7 +142,11 @@ def test_normalize_semester_number_handles_every_expected_variant(raw, expected)
 
 @pytest.mark.parametrize("raw", [0, 3, "3rd Semester", None, "garbage", True])
 def test_normalize_semester_number_rejects_invalid_values(raw):
-    with pytest.raises(ValueError, match="Unrecognized semester value"):
+    # normalize_semester_number raises the categorized InvalidSemesterError
+    # (pipelines/common/errors.py's PipelineError taxonomy), not a bare
+    # ValueError -- this test previously asserted the pre-categorization
+    # contract and needs updating to match, not the implementation.
+    with pytest.raises(InvalidSemesterError, match="Unrecognized semester value"):
         normalize_semester_number(raw)
 
 

@@ -12,6 +12,7 @@ import io
 import pandas as pd
 import pytest
 
+from pipelines.common.errors import InvalidSchemaError
 from pipelines.common.metadata import get_connection
 from pipelines.common.storage import LocalFileStorage
 from pipelines.silver.business_rules import (
@@ -137,9 +138,13 @@ def test_check_admissions_funnel_flags_broken_monotonicity():
 def test_check_admissions_funnel_missing_columns_raises_key_error():
     """No current Silver entity carries applicants/accepted/enrolled_
     freshmen together -- calling this against one of today's 7 entities
-    must fail loudly, not silently pass everything."""
+    must fail loudly, not silently pass everything. The failure is the
+    categorized InvalidSchemaError (pipelines/common/errors.py), not a
+    bare KeyError -- this test's name predates that migration but its
+    assertion needs to match the taxonomy every other business-rule
+    failure in this module already uses."""
     df = pd.DataFrame([{"student_id": "s1", "units_enrolled": 18}])
-    with pytest.raises(KeyError, match="does not model an admissions funnel"):
+    with pytest.raises(InvalidSchemaError, match="do not model an admissions funnel"):
         check_admissions_funnel(df)
 
 
@@ -166,23 +171,39 @@ def test_run_business_validation_quarantines_and_reports(tmp_path):
         {"program_id": "GHOST-PROG", "program_name": "Ghost Program", "college_id": "NOPE",
          "nominal_duration_years": 4.0},
     ]))
-    _write_silver_parquet(storage, "silver/enrollment/data.parquet", pd.DataFrame([
-        # valid row
-        {"student_id": "s1", "academic_year": 2021, "semester_number": 1,
-         "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": 18},
-        # invalid: negative units_enrolled
-        {"student_id": "s2", "academic_year": 2021, "semester_number": 1,
-         "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": -5},
-        # invalid: semester_number out of range
-        {"student_id": "s3", "academic_year": 2021, "semester_number": 9,
-         "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": 18},
-    ]))
+    # 10 clean rows + 2 bad rows (s2, s3) below: run_business_validation's
+    # _enforce_quality_gate (Task 47) escalates to a hard failure once a
+    # SINGLE check's quarantine rate exceeds MAX_QUARANTINE_RATE = 0.25.
+    # check_semester_valid only rejects s3, so it needs enough clean rows
+    # in the denominator to stay under that tolerance (1/12 ~= 8%) --
+    # an earlier version of this fixture used just 3 rows total, which
+    # made check_semester_valid's own 1-row rejection exceed 25% and trip
+    # the gate this test is supposed to exercise past, not into.
+    clean_rows = [
+        {"student_id": f"s-clean-{i}", "academic_year": 2021, "semester_number": 1,
+         "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": 18}
+        for i in range(10)
+    ]
+    _write_silver_parquet(storage, "silver/enrollment/data.parquet", pd.DataFrame(
+        clean_rows
+        + [
+            # valid row
+            {"student_id": "s1", "academic_year": 2021, "semester_number": 1,
+             "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": 18},
+            # invalid: negative units_enrolled
+            {"student_id": "s2", "academic_year": 2021, "semester_number": 1,
+             "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": -5},
+            # invalid: semester_number out of range
+            {"student_id": "s3", "academic_year": 2021, "semester_number": 9,
+             "program_id": "COA-BSARCH", "college_id": "COA", "year_level": 1, "units_enrolled": 18},
+        ]
+    ))
 
     results = run_business_validation(silver_storage=storage, meta_conn=meta_conn)
 
     assert results["program"]["quarantined"] == 1   # GHOST-PROG
     assert results["enrollment"]["quarantined"] == 2  # s2, s3
-    assert results["enrollment"]["rows_out"] == 1
+    assert results["enrollment"]["rows_out"] == 11
 
     quarantined_enrollment = pd.read_parquet(
         io.BytesIO(storage.read_bytes("silver_quarantine/enrollment/business_rules.parquet"))

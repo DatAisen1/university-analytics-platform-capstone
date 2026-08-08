@@ -106,9 +106,10 @@ def normalize_null_like(raw):
 def normalize_semester_number(raw) -> int:
     """Map a semester_number value to the canonical int (1 or 2),
     accepting a plain int, a numeric string, or a '1st/2nd Semester'-
-    style label with incidental whitespace/casing. Raises ValueError for
-    anything else (None, 0, 3+, unparseable text) -- callers that need a
-    non-raising version for bulk cleaning should use
+    style label with incidental whitespace/casing. Raises
+    InvalidSemesterError (pipelines/common/errors.py's categorized
+    taxonomy) for anything else (None, 0, 3+, unparseable text) --
+    callers that need a non-raising version for bulk cleaning should use
     normalize_semester_number_safe instead, the same raising/safe split
     normalize_enrollment_status already establishes.
     """
@@ -134,4 +135,4 @@ def normalize_semester_number_safe(raw):
     try:
         return normalize_semester_number(raw)
     except InvalidSemesterError:
-        return raw  
+        return raw

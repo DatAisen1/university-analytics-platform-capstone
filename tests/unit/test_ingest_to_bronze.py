@@ -176,7 +176,13 @@ def test_ingest_one_runs_schema_validation_and_reports_it(tmp_path):
     meta_conn = get_connection(tmp_path / "meta.duckdb")
 
     valid_students = pd.DataFrame([{
-        "student_id": "2021-00001", "cohort_academic_year": 2021, "gender": "Male", "birth_year": 2003,
+        # cohort_academic_year is the source's raw label ("2021-2022"), not a bare
+        # int -- see data_generator/generators/generate_students.py's
+        # academic_year_label(cohort_year) and STUDENT_SCHEMA in
+        # pipelines/common/schemas.py. An earlier version of this fixture used a
+        # bare int here, which made this the one test asserting SCHEMA_VALID
+        # fail against the schema it was meant to exercise.
+        "student_id": "2021-00001", "cohort_academic_year": "2021-2022", "gender": "Male", "birth_year": 2003,
         "home_province": "Nueva Ecija", "admission_type": "Freshman", "entry_year_level": 1,
         "entry_college_id": "CICT", "entry_program_id": "CICT-BSDS",
     }])

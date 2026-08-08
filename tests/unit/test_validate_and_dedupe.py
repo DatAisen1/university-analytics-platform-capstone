@@ -190,10 +190,18 @@ def test_check_dropout_consistency_accepts_correctly_matched_rows():
 
 
 def test_check_year_level_progression_quarantines_impossible_transition():
+    # The two rows must be CONSECUTIVE observed semesters (period_index
+    # difference == 1) for the impossible-transition rule to apply at all
+    # -- see progression_validation.py's module docstring: a transition
+    # across a GAP (e.g. "1st Semester 2021-2022" -> "1st Semester
+    # 2022-2023", which skips "2nd Semester 2021-2022" and is therefore 2
+    # periods apart) is deliberately NOT checked. An earlier version of
+    # this fixture used exactly that non-consecutive pair, which meant the
+    # rule never fired regardless of the year_level jump.
     enrollment_df = pd.DataFrame([
         {"student_id": "S1", "academic_year": "2021-2022", "semester_name": "1st Semester",
          "year_level": 1, "enrollment_status": "ENROLLED"},
-        {"student_id": "S1", "academic_year": "2022-2023", "semester_name": "1st Semester",
+        {"student_id": "S1", "academic_year": "2021-2022", "semester_name": "2nd Semester",
          "year_level": 3, "enrollment_status": "ENROLLED"},
     ])
 
@@ -210,37 +218,60 @@ def test_check_year_level_progression_quarantines_impossible_transition():
 @pytest.fixture
 def fixture_silver_with_bad_rows(tmp_path):
     """A small Silver enrollment dataset containing ONE of each kind of
-    problem this stage should catch, plus clean rows that must survive."""
+    problem this stage should catch, plus clean rows that must survive.
+
+    The clean-row count below (10 extra students, on top of S-CLEAN) is
+    not arbitrary padding: process_enrollment enforces MAX_QUARANTINE_RATE
+    = 0.25 in aggregate across all four checks (Task 47's quality gate --
+    see validate_and_dedupe.py). With exactly 3 injected bad rows, the
+    batch needs at least 13 total rows for 3/13 (~23%) to clear that
+    tolerance; fewer rows would make the fixture itself trip the gate this
+    stage is supposed to guard, independent of whether quarantining is
+    working correctly. This is a fixture-realism fix, not a change to the
+    gate's threshold.
+    """
     storage = LocalFileStorage(tmp_path / "silver_store")
 
-    student_df = pd.DataFrame([
-        {"student_id": "S-CLEAN", "cohort_academic_year": 2021},
-        {"student_id": "S-DUP", "cohort_academic_year": 2021},
-        {"student_id": "S-UNKNOWN", "cohort_academic_year": 2021},
-        {"student_id": "S-RANGE", "cohort_academic_year": 2022},
-        {"student_id": "S-INCONSISTENT", "cohort_academic_year": 2021},
-    ])
+    extra_clean_ids = [f"S-CLEAN-{i}" for i in range(2, 12)]  # 10 more clean students
+
+    student_df = pd.DataFrame(
+        [
+            {"student_id": "S-CLEAN", "cohort_academic_year": 2021},
+            {"student_id": "S-DUP", "cohort_academic_year": 2021},
+            {"student_id": "S-UNKNOWN", "cohort_academic_year": 2021},
+            {"student_id": "S-RANGE", "cohort_academic_year": 2022},
+            {"student_id": "S-INCONSISTENT", "cohort_academic_year": 2021},
+        ]
+        + [{"student_id": sid, "cohort_academic_year": 2021} for sid in extra_clean_ids]
+    )
 
     dropout_df = pd.DataFrame([{"student_id": "S-CLEAN-DROPOUT", "academic_year": 2021, "semester_number": 1}])
 
-    enrollment_df = pd.DataFrame([
-        {"student_id": "S-CLEAN", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
-         "_ingested_at": _ts(0)},
-        # duplicate -- should collapse to 1 via dedup
-        {"student_id": "S-DUP", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
-         "_ingested_at": _ts(0)},
-        {"student_id": "S-DUP", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
-         "_ingested_at": _ts(0)},
-        # unknown status -- should quarantine
-        {"student_id": "S-UNKNOWN", "academic_year": 2021, "semester_number": 1,
-         "enrollment_status": "UNKNOWN:SUSPENDED", "_ingested_at": _ts(0)},
-        # before cohort entry -- should quarantine
-        {"student_id": "S-RANGE", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
-         "_ingested_at": _ts(0)},
-        # DROPPED with no matching dropout event -- should quarantine
-        {"student_id": "S-INCONSISTENT", "academic_year": 2021, "semester_number": 1,
-         "enrollment_status": "DROPPED", "_ingested_at": _ts(0)},
-    ])
+    enrollment_df = pd.DataFrame(
+        [
+            {"student_id": "S-CLEAN", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
+             "_ingested_at": _ts(0)},
+            # duplicate -- should collapse to 1 via dedup
+            {"student_id": "S-DUP", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
+             "_ingested_at": _ts(0)},
+            {"student_id": "S-DUP", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
+             "_ingested_at": _ts(0)},
+            # unknown status -- should quarantine
+            {"student_id": "S-UNKNOWN", "academic_year": 2021, "semester_number": 1,
+             "enrollment_status": "UNKNOWN:SUSPENDED", "_ingested_at": _ts(0)},
+            # before cohort entry -- should quarantine
+            {"student_id": "S-RANGE", "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
+             "_ingested_at": _ts(0)},
+            # DROPPED with no matching dropout event -- should quarantine
+            {"student_id": "S-INCONSISTENT", "academic_year": 2021, "semester_number": 1,
+             "enrollment_status": "DROPPED", "_ingested_at": _ts(0)},
+        ]
+        + [
+            {"student_id": sid, "academic_year": 2021, "semester_number": 1, "enrollment_status": "ENROLLED",
+             "_ingested_at": _ts(0)}
+            for sid in extra_clean_ids
+        ]
+    )
 
     def _write(key, df):
         import io
@@ -261,14 +292,14 @@ def test_process_enrollment_end_to_end_with_injected_bad_rows(fixture_silver_wit
     meta_conn = get_connection(tmp_path / "meta.duckdb")
     summary = process_enrollment(silver_storage=fixture_silver_with_bad_rows, meta_conn=meta_conn)
 
-    assert summary["rows_in"] == 6
+    assert summary["rows_in"] == 16  # 6 original + 10 padding clean rows (see fixture docstring)
     assert summary["duplicates_dropped"] == 1       # S-DUP's two identical rows -> 1
     assert summary["quarantined_unknown_status"] == 1   # S-UNKNOWN
     assert summary["quarantined_range"] == 1            # S-RANGE
     assert summary["quarantined_consistency"] == 1       # S-INCONSISTENT
     assert summary["total_quarantined"] == 3
-    # 6 in - 1 duplicate - 3 quarantined = 2 remaining (S-CLEAN, S-DUP's survivor)
-    assert summary["rows_out"] == 2
+    # 16 in - 1 duplicate - 3 quarantined = 12 remaining
+    assert summary["rows_out"] == 12
 
 
 def test_process_enrollment_writes_quarantine_table_with_reasons(fixture_silver_with_bad_rows, tmp_path):
