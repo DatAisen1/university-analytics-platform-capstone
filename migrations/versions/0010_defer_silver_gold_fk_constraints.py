@@ -1,4 +1,4 @@
-"""Make gold-schema foreign keys DEFERRABLE INITIALLY DEFERRED
+"""Make silver- and gold-schema foreign keys DEFERRABLE INITIALLY DEFERRED
 
 Revision ID: 0010
 Revises: 0009
@@ -49,12 +49,34 @@ depends_on = None
 # pipelines/common/postgres.py's replace_all_table_contents for the
 # transactional reload that relies on this.
 #
-# Scoped to every FK constraint DEFINED ON a table in the `gold` schema
-# (queried from pg_constraint rather than hand-listing ~35 auto-generated
-# constraint names, which would be one typo away from silently skipping
-# a constraint) -- this covers every dim->dim, fact->dim, and
-# ml_features/model_registry/fact_forecast->dim reference in one pass,
-# and stays correct automatically if a future migration adds another.
+# Scoped to every FK constraint DEFINED ON a table in the `gold` OR
+# `silver` schema (queried from pg_constraint rather than hand-listing
+# ~40 auto-generated constraint names, which would be one typo away from
+# silently skipping a constraint) -- this covers every dim->dim,
+# fact->dim, and ml_features/model_registry/fact_forecast->dim reference
+# in `gold`, and every college->program->student->{enrollment,
+# graduation, dropout, shifter} reference in `silver`, in one pass, and
+# stays correct automatically if a future migration adds another.
+#
+# Bug found reviewing P0.51-54 (post-hoc, same session as the fix above):
+# this migration's own FILENAME (0010_defer_silver_gold_fk_constraints)
+# already promised both schemas, but the query body only ever scoped
+# `connamespace = 'gold'::regnamespace` -- silver's FK constraints were
+# never actually altered. That's not cosmetic: load_silver_to_postgres.py
+# calls the exact same replace_all_table_contents() Gold uses, against
+# silver.college <- silver.program/student <- silver.enrollment/
+# graduation/dropout/shifter -- a real FK-connected chain. Without this,
+# `SET CONSTRAINTS ALL DEFERRED` is a silent no-op for every silver
+# constraint (Postgres only allows deferring a constraint that was
+# declared/altered DEFERRABLE in the first place), so the DELETE-then-
+# reinsert loop in replace_all_table_contents would fail immediately on
+# `DELETE FROM silver.college` with a foreign key violation, the moment
+# ANY row in silver.program/silver.student still referenced it -- i.e.
+# on every load, not just a rerun. Confirmed against a live Postgres 16
+# instance: silver's FK constraints all showed `condeferrable = f`
+# before this fix.
+_SCHEMAS = ("gold", "silver")
+
 _UPGRADE_SQL = """
 DO $$
 DECLARE
@@ -64,7 +86,7 @@ BEGIN
         SELECT conname, conrelid::regclass AS table_name
         FROM pg_constraint
         WHERE contype = 'f'
-          AND connamespace = 'gold'::regnamespace
+          AND connamespace = ANY (ARRAY['gold', 'silver']::regnamespace[])
     LOOP
         EXECUTE format(
             'ALTER TABLE %s ALTER CONSTRAINT %I DEFERRABLE INITIALLY DEFERRED',
@@ -83,7 +105,7 @@ BEGIN
         SELECT conname, conrelid::regclass AS table_name
         FROM pg_constraint
         WHERE contype = 'f'
-          AND connamespace = 'gold'::regnamespace
+          AND connamespace = ANY (ARRAY['gold', 'silver']::regnamespace[])
     LOOP
         EXECUTE format(
             'ALTER TABLE %s ALTER CONSTRAINT %I NOT DEFERRABLE',

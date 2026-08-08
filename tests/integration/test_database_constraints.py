@@ -106,16 +106,35 @@ def test_migrations_are_all_applied():
     superseded one -- checking meta.schema_migrations would fail on
     every correctly migrated database, since that table is no longer
     created at all.
+
+    Bug fix: this used to assert `current_head == "0009"` -- a literal
+    revision id. That's a maintenance trap disguised as a regression
+    test: it silently goes stale (and starts failing on an otherwise-
+    correct database) every time a new migration is added, which is
+    exactly what happened when migrations 0010 and 0011 were added in
+    this same P0.51-54 pass. Compare against Alembic's own script
+    directory heads instead -- the actual "is this database current"
+    question -- so the test keeps testing the right thing as the
+    migration chain grows, the same principle assert_up_to_date()
+    already follows in application code.
     """
+    from alembic.script import ScriptDirectory
+
+    from pipelines.common.migrations import _alembic_config
+
     conn = get_admin_connection(TEST_ENV)
     with conn.cursor() as cur:
         cur.execute("SELECT version_num FROM alembic_version")
         current_head = cur.fetchone()[0]
     conn.close()
-    # 0009 is the latest revision as of this migration chain; a lower
-    # head means the Silver/Gold-constraint/ML/forecast migrations
-    # (0004-0009) never ran -- the exact original bug this test guards.
-    assert current_head == "0009", f"expected Alembic head 0009, database is at {current_head!r}"
+
+    expected_heads = set(ScriptDirectory.from_config(_alembic_config()).get_heads())
+    assert {current_head} == expected_heads, (
+        f"expected Alembic head(s) {expected_heads}, database is at {current_head!r} "
+        f"-- migrations 0004-0011 (Silver/Gold constraints, ML/forecast, "
+        f"deferred FKs, alembic_version grant) never ran, or a newer "
+        f"migration hasn't been applied yet."
+    )
 
 
 def test_apply_migrations_twice_is_a_noop():

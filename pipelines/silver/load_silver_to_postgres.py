@@ -82,7 +82,23 @@ def load_silver_to_postgres(
     """
     from pipelines.common.migrations import assert_up_to_date
 
-    assert_up_to_date(engine.raw_connection())  # Task 25: fail loudly, not via a silent to_sql table
+    # Bug found reviewing P0.51-54: `engine.raw_connection()` checks a
+    # connection OUT of engine's pool; nothing was ever calling
+    # `.close()` on it to check it back in. Every single load call
+    # leaked one pooled connection, left sitting "idle in transaction"
+    # (assert_up_to_date's own MigrationContext query opens an implicit
+    # transaction on it that nothing ever committed or rolled back) --
+    # a real production hazard (eventual pool/connection exhaustion,
+    # idle-in-transaction locks) that also showed up as flaky migration-
+    # state visibility in this project's own test suite once a test
+    # called this twice against the same engine (idempotency reruns are
+    # exactly that pattern). Explicit close() returns it to the pool
+    # cleanly regardless of whether assert_up_to_date raises.
+    raw_conn = engine.raw_connection()
+    try:
+        assert_up_to_date(raw_conn)  # Task 25: fail loudly, not via a silent to_sql table
+    finally:
+        raw_conn.close()
 
     silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
     tables = tables or SILVER_TABLES

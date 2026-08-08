@@ -76,7 +76,13 @@ def load_gold_to_postgres(
     """
     from pipelines.common.migrations import assert_up_to_date
 
-    assert_up_to_date(engine.raw_connection())  # Task 25: fail loudly, not via a silent to_sql table
+    # See pipelines/silver/load_silver_to_postgres.py's matching fix for
+    # why this must be closed explicitly (P0.51-54 connection-leak bug).
+    raw_conn = engine.raw_connection()
+    try:
+        assert_up_to_date(raw_conn)  # Task 25: fail loudly, not via a silent to_sql table
+    finally:
+        raw_conn.close()
 
     gold_storage = gold_storage or LocalFileStorage(DEFAULT_GOLD_STORAGE_PATH)
     tables = tables or GOLD_TABLES
