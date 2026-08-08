@@ -90,7 +90,20 @@ services:
     volumes:
       - miniodata:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      # NOT curl: minio/minio images have shipped WITHOUT curl or wget
+      # since the RELEASE.2023-11-01+ line (curl removed upstream --
+      # see minio/minio#18373, #18389, #18375). This image is pinned to
+      # RELEASE.2024-05-10, well after that change, so a curl-based
+      # test execs a binary that doesn't exist *inside the container*
+      # and fails every single run -- Docker would report this service
+      # permanently "unhealthy" even though MinIO itself is fully up
+      # and serving traffic on 9000. `mc` (the MinIO client) IS bundled
+      # in the image and is upstream's own documented replacement
+      # (minio/minio#18375: "if you insist on using Docker's
+      # healthchecks, embrace `mc ready local`"). `local` here is a
+      # built-in alias MinIO registers for its own instance -- no `mc
+      # alias set` or credentials required.
+      test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 5s
       retries: 10
