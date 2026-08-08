@@ -47,12 +47,12 @@ def test_asset_dependency_order_matches_architecture_diagram():
     order = [key.to_user_string() for key in resolved.toposorted_asset_keys]
 
     prerequisite_order = [
-        "ingestion",
         "bronze",
         "silver",
         "validation",
         "gold",
         "warehouse",
+        "dbt",
         "features",
         "training",
         "evaluation",
@@ -71,13 +71,13 @@ def test_each_asset_depends_only_on_its_documented_predecessor():
         from dagster import AssetKey
         return {k.to_user_string() for k in resolved.get(AssetKey(name)).parent_keys}
 
-    assert upstream_of("ingestion") == set()
-    assert upstream_of("bronze") == {"ingestion"}
+    assert upstream_of("bronze") == set()
     assert upstream_of("silver") == {"bronze"}
     assert upstream_of("validation") == {"silver"}
     assert upstream_of("gold") == {"validation"}
     assert upstream_of("warehouse") == {"gold"}
-    assert upstream_of("features") == {"warehouse"}
+    assert upstream_of("dbt") == {"warehouse"}
+    assert upstream_of("features") == {"dbt"}
     assert upstream_of("training") == {"features"}
     assert upstream_of("evaluation") == {"training"}
     assert upstream_of("forecast") == {"evaluation"}
@@ -163,9 +163,20 @@ def test_full_pipeline_materializes_successfully_via_dagster():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "RUN_SUCCESS" in result.stdout or "RUN_SUCCESS" in result.stderr
 
+    # P0.45/P0.44 fix: this list previously named assets that never
+    # existed in orchestration/assets.py under any version of this
+    # codebase (bronze_layer, gold_dimensions, gold_facts, gold_kpi,
+    # dbt_staging_and_marts, ...) -- a stale/aspirational asset-naming
+    # scheme that was never reconciled with the actual 10-asset graph.
+    # Corrected to the real asset names (see all_assets in
+    # orchestration/assets.py). The exact "Materialized value <name>"
+    # substring format could not be verified against a live `dagster`
+    # CLI in this environment (no dagster/Postgres/dbt available) --
+    # confirm this assertion format the first time this test actually
+    # runs (Postgres + dbt CLI both present).
     combined_output = result.stdout + result.stderr
     for asset_name in [
-        "bronze_layer", "silver_cleaned", "silver_validated", "gold_dimensions",
-        "gold_facts", "gold_kpi", "gold_in_postgres", "ml_forecast_features", "dbt_staging_and_marts",
+        "bronze", "silver", "validation", "gold", "warehouse",
+        "dbt", "features", "training", "evaluation", "forecast",
     ]:
         assert f"Materialized value {asset_name}" in combined_output, f"{asset_name} did not materialize"

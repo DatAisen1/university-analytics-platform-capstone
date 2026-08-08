@@ -45,6 +45,7 @@ tests/unit/test_build_ml_features.py).
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import List, Optional
 
 import pandas as pd
@@ -53,6 +54,34 @@ from pipelines.common.postgres import replace_table_contents
 from pipelines.common.errors import FeatureEngineeringError
 PROGRAM_GRAIN_METRICS = ["enrollment_count", "graduation_count"]
 YEAR_LEVEL_GRAIN_METRICS = ["enrollment_count"]
+
+
+@dataclass(frozen=True)
+class FeatureBuildResult:
+    """Explicit result contract for build_and_store_ml_features (P0.47).
+
+    Replaces the previous untyped dict return, which orchestration/
+    assets.py's `features` asset was misreading as if it were a single
+    scalar row count (`row_count = build_and_store_ml_features(engine)`)
+    -- that assigned the whole dict to a variable named for an int, then
+    passed it straight into `records_processed: int` (a DuckDB INTEGER
+    column via record_pipeline_run), a real type mismatch, not just a
+    naming nit. A dataclass with named int/str fields makes that
+    misuse a type error callers catch before it ever reaches the
+    database, instead of an ambiguous dict whose shape has to be
+    remembered at every call site.
+    """
+
+    program_rows: int
+    year_level_rows: int
+    program_fingerprint: str
+    year_level_fingerprint: str
+
+    @property
+    def total_rows(self) -> int:
+        """Combined row count across both feature tables -- what a
+        caller wants for a single `records_processed` figure."""
+        return self.program_rows + self.year_level_rows
 
 
 def _lag_rolling_trend_sql(metric: str, partition_cols: str) -> str:
@@ -217,7 +246,7 @@ def build_enrollment_features_by_year_level(engine) -> pd.DataFrame:
     return pd.read_sql(build_enrollment_features_by_year_level_sql(), engine)
 
 
-def build_and_store_ml_features(engine) -> dict:
+def build_and_store_ml_features(engine) -> FeatureBuildResult:
     try:
         program_df = build_program_forecast_features(engine)
         year_level_df = build_enrollment_features_by_year_level(engine)
@@ -238,20 +267,22 @@ def build_and_store_ml_features(engine) -> dict:
     replace_table_contents(engine, "gold", "ml_program_forecast_features", program_df)
     replace_table_contents(engine, "gold", "ml_enrollment_features_by_year_level", year_level_df)
 
-    return {
-        "ml_program_forecast_features_rows": len(program_df),
-        "ml_enrollment_features_by_year_level_rows": len(year_level_df),
-        "ml_program_forecast_features_fingerprint": feature_dataset_fingerprint(program_df),
-        "ml_enrollment_features_by_year_level_fingerprint": feature_dataset_fingerprint(year_level_df),
-    }
+    return FeatureBuildResult(
+        program_rows=len(program_df),
+        year_level_rows=len(year_level_df),
+        program_fingerprint=feature_dataset_fingerprint(program_df),
+        year_level_fingerprint=feature_dataset_fingerprint(year_level_df),
+    )
 
 
 if __name__ == "__main__":
+    from dataclasses import asdict
+
     from pipelines.common.settings import get_postgres_settings
     from pipelines.gold.load_gold_to_postgres import build_pipeline_writer_engine
 
     password = get_postgres_settings().require_pipeline_writer_password()
     engine = build_pipeline_writer_engine(password)
     summary = build_and_store_ml_features(engine)
-    for key, value in summary.items():
+    for key, value in asdict(summary).items():
         print(f"{key}: {value}")

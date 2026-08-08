@@ -245,15 +245,37 @@ def build_dim_gender() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def build_dim_college(college_df: pd.DataFrame) -> pd.DataFrame:
-    df = college_df[["college_id", "college_name"]].drop_duplicates().reset_index(drop=True)
+    # P0.53 fix: sort by the natural key BEFORE assigning the surrogate
+    # key. Without this, `college_key` was assigned in whatever row
+    # order college_df happened to arrive in (Bronze/Silver read order,
+    # not guaranteed stable across runs or storage backends) --
+    # logically identical input could get DIFFERENT college_key values
+    # on two runs, which cascades into every downstream fact/dim
+    # (dim_program.college_key, dim_student.college_key, every fact
+    # table's college_key) and breaks P0.53's "same input -> same
+    # logical output" fingerprint requirement, plus the P0.51 reload
+    # fix's assumption that a re-emptied-and-refilled dimension row has
+    # the SAME surrogate key other tables still reference mid-transaction.
+    df = (
+        college_df[["college_id", "college_name"]]
+        .drop_duplicates()
+        .sort_values("college_id")
+        .reset_index(drop=True)
+    )
     df.insert(0, "college_key", range(1, len(df) + 1))
     return df
 
 
 def build_dim_program(program_df: pd.DataFrame, dim_college: pd.DataFrame) -> pd.DataFrame:
     college_key_by_id = dict(zip(dim_college["college_id"], dim_college["college_key"]))
-    df = program_df[["program_id", "program_name", "college_id", "program_level",
-                      "nominal_duration_years"]].drop_duplicates().reset_index(drop=True)
+    # P0.53 fix: same determinism issue as build_dim_college above.
+    df = (
+        program_df[["program_id", "program_name", "college_id", "program_level",
+                     "nominal_duration_years"]]
+        .drop_duplicates()
+        .sort_values("program_id")
+        .reset_index(drop=True)
+    )
     df.insert(0, "program_key", range(1, len(df) + 1))
     df["college_key"] = df["college_id"].map(college_key_by_id)
     return df
@@ -289,7 +311,12 @@ def build_dim_student(
         shifts_by_student.setdefault(row["student_id"], []).append(row.to_dict())
 
     all_rows: List[dict] = []
-    for _, student in student_df.iterrows():
+    # P0.53 fix: sort by student_id before iterating -- same determinism
+    # issue as build_dim_college/build_dim_program (see those docstrings).
+    # student_key is assigned by row position below, so an unstable
+    # student_df row order produced unstable student_key values across
+    # otherwise-identical reruns.
+    for _, student in student_df.sort_values("student_id").iterrows():
         sid = student["student_id"]
         entry_year = int(student["cohort_academic_year"])
         entry_ordinal = period_ordinal(entry_year, 1)

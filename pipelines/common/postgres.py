@@ -149,13 +149,26 @@ def replace_table_contents(engine, schema: str, table_name: str, df) -> None:
     silent constraint-less table. Run
     `pipelines.common.migrations.apply_migrations()` (or the warehouse
     bootstrap) before calling this.
+
+    Only safe for a table with NO other table's foreign key referencing
+    it (Postgres structurally refuses to TRUNCATE such a table -- see
+    migration 0010's docstring) -- e.g. gold.ml_program_forecast_features,
+    a leaf table nothing else references. For a set of FK-connected
+    tables (any gold dimension, any silver table), use
+    replace_all_table_contents instead.
+
+    P0.51 fix: TRUNCATE and the subsequent INSERT now share ONE
+    transaction (previously two separate operations -- a committed
+    TRUNCATE followed by an unguarded `to_sql` outside any `with` block),
+    so a failure partway through the insert rolls back the TRUNCATE too,
+    instead of leaving the table truncated-but-not-repopulated for the
+    next reader to observe.
     """
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names(schema=schema))
 
-    # AFTER
     if table_name not in existing_tables:
         raise MissingTableError(
             f"{schema}.{table_name} does not exist. Apply migrations "
@@ -169,7 +182,71 @@ def replace_table_contents(engine, schema: str, table_name: str, df) -> None:
 
     with engine.begin() as conn:
         conn.execute(text(f'TRUNCATE TABLE {schema}."{table_name}"'))
-    df.to_sql(table_name, engine, schema=schema, if_exists="append", index=False)
+        df.to_sql(table_name, conn, schema=schema, if_exists="append", index=False)
+
+
+def replace_all_table_contents(engine, schema: str, tables: List[tuple]) -> None:
+    """Reload multiple FK-connected tables atomically.
+
+    `tables` is an ordered list of (table_name, dataframe) pairs. Every
+    table is DELETEd, then every table is bulk-inserted, all inside ONE
+    transaction with `SET CONSTRAINTS ALL DEFERRED` (migration 0010
+    marks every gold/silver FK constraint DEFERRABLE INITIALLY DEFERRED
+    specifically so this works).
+
+    Why DELETE, not TRUNCATE: TRUNCATE structurally refuses to run on a
+    table with an incoming FK reference from ANY other table -- a check
+    unrelated to, and NOT bypassed by, deferred constraints (Postgres
+    doesn't fire triggers or do per-row FK checking for TRUNCATE at all;
+    "cannot truncate a table referenced in a foreign key constraint" is
+    unconditional). DELETE performs normal per-row FK checking, which
+    `SET CONSTRAINTS ALL DEFERRED` postpones to COMMIT -- so a
+    dimension table can be fully emptied and refilled mid-transaction
+    while a fact table (also being emptied and refilled in this same
+    call) momentarily has stale-looking references; both are correct
+    again by the time the transaction commits, which is the only point
+    Postgres actually checks.
+
+    Why this only needs to include the tables actually being reloaded
+    (not every table anywhere that references them, unlike the CASCADE
+    problem `replace_table_contents` docstring describes): DELETE's
+    constraint check is per-ROW, based on values, not TRUNCATE's
+    per-TABLE structural check. A table outside `tables` (e.g.
+    gold.model_registry) that still references a row this call deletes
+    and re-inserts is fine as long as an identical row (same surrogate
+    key) exists again by commit time -- which holds given
+    build_dimensions.py's deterministic surrogate key assignment
+    (P0.53 fix). If it referenced a row that's genuinely gone (not just
+    momentarily deleted-and-reinserted), the COMMIT-time check still
+    correctly raises -- this function doesn't weaken referential
+    integrity, it only changes when Postgres is allowed to check it.
+
+    Table order matters only for readability, not correctness (deferred
+    constraints mean insert order is unconstrained); callers should
+    still pass parent-before-child for that reason.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names(schema=schema))
+    missing = [name for name, _ in tables if name not in existing_tables]
+    if missing:
+        raise MissingTableError(
+            f"{schema}.{', '.join(missing)} do not exist. Apply migrations "
+            f"(pipelines.common.migrations.apply_migrations) before loading data -- "
+            f"tables must be created by tracked DDL, with their full constraints, "
+            f"never implicitly by pandas.to_sql.",
+            stage="Postgres Load",
+            entity=f"{schema}.{','.join(missing)}",
+            rows_affected=sum(len(df) for name, df in tables if name in missing),
+        )
+
+    with engine.begin() as conn:
+        conn.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+        for table_name, _ in tables:
+            conn.execute(text(f'DELETE FROM {schema}."{table_name}"'))
+        for table_name, df in tables:
+            df.to_sql(table_name, conn, schema=schema, if_exists="append", index=False)
 
 
 if __name__ == "__main__":

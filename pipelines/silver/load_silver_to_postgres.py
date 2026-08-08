@@ -14,12 +14,18 @@ attach it to, and nothing loaded data into one. warehouse/ddl/
 constraints; this loader is what actually gets Silver's Parquet output
 into them.
 
-Idempotency (Task 26/27): uses the same TRUNCATE-safe
-pipelines.common.postgres.replace_table_contents() Gold already uses --
-running this twice, or after a prior partial failure, converges to the
-same end state: whatever the CURRENT Silver Parquet output is, exactly
-once per row, never doubled. It also requires migrations to have already
-run (pipelines.common.postgres.MissingTableError otherwise) rather than
+Idempotency (Task 26/27, fixed for real by P0.51): uses the shared
+pipelines.common.postgres.replace_all_table_contents() Gold now also
+uses -- running this twice, or after a prior partial failure, converges
+to the same end state: whatever the CURRENT Silver Parquet output is,
+exactly once per row, never doubled. The original Task 26/27 claim used
+per-table TRUNCATE (replace_table_contents), which could never actually
+complete against this schema at all: silver.college is referenced by
+silver.program and silver.student, and Postgres structurally refuses to
+TRUNCATE a table with any incoming FK reference, regardless of the
+referencing table's current row count (see migration 0010's docstring).
+It also requires migrations to have already run
+(pipelines.common.postgres.MissingTableError otherwise) rather than
 falling back to creating an unconstrained table.
 """
 
@@ -32,7 +38,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 from sqlalchemy import create_engine
 
-from pipelines.common.postgres import replace_table_contents
+from pipelines.common.postgres import replace_all_table_contents
 from pipelines.common.storage import LocalFileStorage, ObjectStorage
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -63,11 +69,16 @@ def load_silver_to_postgres(
     silver_storage: Optional[ObjectStorage] = None,
     tables: Optional[List[str]] = None,
 ) -> Dict[str, int]:
-    """Load each Silver Parquet table into Postgres's silver schema, via
-    the shared TRUNCATE-safe writer. Raises
-    pipelines.common.postgres.MissingTableError if migrations haven't
-    been applied yet -- run pipelines.common.migrations.apply_migrations()
-    (or the warehouse bootstrap) first.
+    """Load every Silver Parquet table into Postgres's silver schema,
+    atomically, via pipelines.common.postgres.replace_all_table_contents
+    (P0.51 fix -- silver.college is referenced by silver.program and
+    silver.student, and both are referenced by enrollment/graduation/
+    dropout/shifter, so the previous per-table TRUNCATE loop could not
+    actually succeed against this schema; see that function's docstring
+    and migration 0010). Raises pipelines.common.postgres.MissingTableError
+    if migrations haven't been applied yet -- run
+    pipelines.common.migrations.apply_migrations() (or the warehouse
+    bootstrap) first.
     """
     from pipelines.common.migrations import assert_up_to_date
 
@@ -76,17 +87,17 @@ def load_silver_to_postgres(
     silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
     tables = tables or SILVER_TABLES
 
-    row_counts: Dict[str, int] = {}
+    loaded = []
     for table_name in tables:
         df = _read_parquet(silver_storage, f"silver/{table_name}/data.parquet")
         # Postgres columns are NOT NULL per 004_silver_star_schema.sql;
         # drop the Bronze/Silver-internal audit/quarantine columns that
         # aren't part of the governed Silver schema for these tables.
         df = df[[c for c in df.columns if not c.startswith("_")]]
-        replace_table_contents(engine, "silver", table_name, df)
-        row_counts[table_name] = len(df)
+        loaded.append((table_name, df))
 
-    return row_counts
+    replace_all_table_contents(engine, "silver", loaded)
+    return {name: len(df) for name, df in loaded}
 
 
 if __name__ == "__main__":

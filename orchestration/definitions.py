@@ -2,9 +2,10 @@
 orchestration/definitions.py
 
 
-Dagster entry point: wires orchestration/assets.py's 10 assets into a
-single job (materialize everything, Bronze through dbt marts + ML
-features) and a schedule matching a real registrar's actual cadence.
+Dagster entry point: wires orchestration/assets.py's 10 assets
+(bronze -> silver -> validation -> gold -> warehouse -> dbt -> features ->
+training -> evaluation -> forecast) into a single job and a schedule
+matching a real registrar's actual cadence.
 
 On the schedule's cadence: a real university delivers batch extracts
 roughly twice a year (once per semester), not on any shorter cycle --
@@ -27,7 +28,7 @@ from orchestration.assets import all_assets
 full_pipeline_job = define_asset_job(
     name="full_pipeline_job",
     selection=all_assets,
-    description="Materializes the full ingestion -> bronze -> silver -> validation -> gold -> warehouse -> features -> training -> evaluation -> forecast pipeline in dependency order.",
+    description="Materializes the full bronze -> silver -> validation -> gold -> warehouse -> dbt -> features -> training -> evaluation -> forecast pipeline in dependency order.",
 )
 
 semester_schedule = ScheduleDefinition(

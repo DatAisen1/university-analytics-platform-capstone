@@ -32,7 +32,7 @@ This project covers **3 academic years — `2021-2022`, `2022-2023`, `2023-2024`
 | [13 — Best Practices](13_Best_Practices.md) | Testing, code review, governance practices |
 | [14 — Future Improvements](14_Future_Improvements.md) | Scoped-out ideas + trigger conditions, including the academic-calendar and ownership migration notes |
 | [15 — Tooling Responsibility Matrix](15_Tooling_Responsibility_Matrix.md) | Team ownership boundary + internal tool responsibility split |
-| [18 — Internal Architecture Flow](18_Internal_Architecture_Flow.md) | Source→Ingestion→Bronze→Silver→Gold→Warehouse→Features→ML→Forecast, mapped to Dagster assets and code (web/Supabase intentionally excluded) |
+| [18 — Internal Architecture Flow](18_Internal_Architecture_Flow.md) | Source→Bronze→Silver→Gold→Warehouse→dbt→Features→ML→Forecast, mapped to Dagster assets and code (web/Supabase intentionally excluded) |
 | [19 — Data Contracts](19_Data_Contracts.md) | Bronze/Silver/canonical schema, data types, academic-year/semester/year-level rules, cross-entity business rules, validation enforcement |
 | [20 — ML Assumptions](20_ML_Assumptions.md) | Forecast target and grain, training window and walk-forward folds, evaluation metrics, promotion and retraining rules |
 

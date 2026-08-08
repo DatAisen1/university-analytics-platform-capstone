@@ -28,7 +28,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 from sqlalchemy import create_engine
 
-from pipelines.common.postgres import replace_table_contents
+from pipelines.common.postgres import replace_all_table_contents
 from pipelines.common.storage import LocalFileStorage, ObjectStorage
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -68,10 +68,11 @@ def load_gold_to_postgres(
     gold_storage: Optional[ObjectStorage] = None,
     tables: Optional[List[str]] = None,
 ) -> Dict[str, int]:
-    """Load each Gold Parquet table into Postgres's gold schema, via the
-    shared TRUNCATE-safe writer (pipelines.common.postgres.replace_table_contents)
-    -- see that function's docstring for why this must never be a naive
-    DROP-based 'replace'.
+    """Load every Gold Parquet table into Postgres's gold schema,
+    atomically, via pipelines.common.postgres.replace_all_table_contents
+    (P0.51 fix -- see that function's docstring and migration 0010: the
+    previous per-table TRUNCATE loop structurally could not succeed
+    against these FK-connected tables, on the first load or any other).
     """
     from pipelines.common.migrations import assert_up_to_date
 
@@ -80,13 +81,10 @@ def load_gold_to_postgres(
     gold_storage = gold_storage or LocalFileStorage(DEFAULT_GOLD_STORAGE_PATH)
     tables = tables or GOLD_TABLES
 
-    row_counts: Dict[str, int] = {}
-    for table_name in tables:
-        df = _read_parquet(gold_storage, f"gold/{table_name}/data.parquet")
-        replace_table_contents(engine, "gold", table_name, df)
-        row_counts[table_name] = len(df)
+    loaded = [(name, _read_parquet(gold_storage, f"gold/{name}/data.parquet")) for name in tables]
+    replace_all_table_contents(engine, "gold", loaded)
 
-    return row_counts
+    return {name: len(df) for name, df in loaded}
 
 
 if __name__ == "__main__":

@@ -13,8 +13,6 @@
 ```
 Data Source
   ↓
-Ingestion
-  ↓
 Bronze
   ↓
 Silver
@@ -22,6 +20,8 @@ Silver
 Gold
   ↓
 Warehouse
+  ↓
+dbt
   ↓
 Feature Engineering
   ↓
@@ -37,12 +37,12 @@ output of the stage directly above it. It is implemented as ten Dagster
 
 ```python
 all_assets = [
-    ingestion,
     bronze,
     silver,
     validation,
     gold,
     warehouse,
+    dbt,
     features,
     training,
     evaluation,
@@ -65,23 +65,29 @@ Semester extract files (per-entity CSV/Parquet) representing the raw
 university records for a given academic year/semester. Not owned by this
 repository — it is the inbound handoff point.
 
-### Ingestion
-`pipelines/ingestion/ingest_to_bronze.py` (`ingest_all()`). Reads the raw
-extract, performs the minimal file-level checks (file exists, required
-columns present), tags each row with ingestion metadata, and hands off to
-Bronze storage. `pipelines/ingestion/audit_bronze.py` provides a
-post-ingestion audit pass.
-
 ### Bronze
-Raw, untouched-in-substance data, stored as Parquet under `bronze/<entity>/`
-via `pipelines.common.storage.ObjectStorage` (local filesystem or MinIO,
-selected by `pipelines/common/config.py`). Bronze is validated for **shape
-only** — `pipelines/common/schemas.py` — not for business correctness. Its
-own module docstring is explicit about this: an `enrollment_status` column
-is deliberately **not** restricted to a controlled vocabulary at this layer,
-because Bronze intentionally preserves the messy, realistic text variants a
-real source system would send (`' ENROLLED '`, `'DROPPED OUT'`, etc.) — that
-is Silver's job to normalize, not Bronze's job to reject.
+`pipelines/ingestion/ingest_to_bronze.py` (`ingest_all()`, the `bronze`
+Dagster asset). Reads the raw semester extract, performs the minimal
+file-level checks (file exists, required columns present), tags each row
+with ingestion metadata, and writes it as Parquet under
+`bronze/<entity>/` via `pipelines.common.storage.ObjectStorage` (local
+filesystem or MinIO, selected by `pipelines/common/config.py`).
+`pipelines/ingestion/audit_bronze.py` provides a post-ingestion audit
+pass. There is no separate "ingestion" stage upstream of this one:
+`ingest_all()` performs the full source-read-to-Bronze-write operation
+atomically, so it is a single asset with no Dagster dependency of its
+own (an earlier version of this module had `ingestion` and `bronze` as
+two separate assets that each called `ingest_all()` — the same
+operation ran twice per materialization; see P0.45 in the stabilization
+backlog).
+
+Bronze is validated for **shape only** — `pipelines/common/schemas.py` —
+not for business correctness. Its own module docstring is explicit about
+this: an `enrollment_status` column is deliberately **not** restricted to
+a controlled vocabulary at this layer, because Bronze intentionally
+preserves the messy, realistic text variants a real source system would
+send (`' ENROLLED '`, `'DROPPED OUT'`, etc.) — that is Silver's job to
+normalize, not Bronze's job to reject.
 
 ### Silver
 Three sub-stages, run in sequence:
@@ -115,9 +121,21 @@ the layer where the canonical dataset contract
 ### Warehouse
 `pipelines/gold/load_gold_to_postgres.py` (the `warehouse` asset) loads the
 Gold layer's DuckDB-computed tables into PostgreSQL, which is the system of
-record every downstream stage (features, ML, forecast) reads from. DDL for
-the warehouse lives under `warehouse/ddl/*.sql`, applied in order by
+record every downstream stage (dbt, features, ML, forecast) reads from. DDL
+for the warehouse lives under `warehouse/ddl/*.sql`, applied in order by
 `pipelines/common/migrations.py`.
+
+### dbt
+`pipelines/common/dbt_runner.py` (`run_dbt`, the `dbt` asset) runs
+`dbt run` then `dbt test` against the warehouse-loaded `gold` schema,
+building the `staging`/`marts` layer dashboards read (`dbt/models/`) and
+enforcing the required `unique`/`not_null`/`relationships`/
+`accepted_values` tests. A non-zero exit from either command raises a
+categorized `DbtError`, which fails this asset and — via Dagster's normal
+dependency propagation — prevents `features` from running against a Gold
+snapshot that failed its own data-quality tests. See `dbt/models/staging/`
+and `dbt/models/marts/` for the source/staging/marts contract this asset
+materializes.
 
 ### Feature Engineering
 `pipelines/gold/build_ml_features.py` (the `features` asset) builds two
@@ -173,4 +191,4 @@ as a *planned* interface, in `docs/06_Data_Warehouse.md` §5 and
 `docs/17_Consumption_Boundary_MinIO_Supabase.md`, but no code in this
 pipeline currently implements a Supabase or web-facing integration — the
 pipeline's own last stage is `forecast`, writing to
-`gold.fact_forecast`/`gold.model_registry` in PostgreSQL.    
+`gold.fact_forecast`/`gold.model_registry` in PostgreSQL.re

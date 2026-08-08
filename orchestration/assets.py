@@ -3,15 +3,40 @@ orchestration/assets.py
 
 Dagster asset-based orchestration for the full university analytics
 pipeline. The lineage is expressed explicitly as a single staged graph:
-ingestion -> bronze -> silver -> validation -> gold -> warehouse ->
-features -> training -> evaluation -> forecast.
+bronze -> silver -> validation -> gold -> warehouse -> dbt -> features ->
+training -> evaluation -> forecast.
+
+`source` (the data_generator's CSV output) is not its own asset: it is
+an external, upstream artifact this pipeline consumes but does not
+orchestrate -- there is no separate "extract from source" operation in
+this codebase distinct from the bronze write itself (ingest_all() does
+both atomically: read the source file, validate it, write Bronze). An
+asset representing that non-operation would just be a no-op wrapper
+around the same function bronze already calls.
+
+P0.45 fix: a prior version of this module had both an `ingestion` asset
+and a `bronze` asset independently calling ingest_all() -- i.e. the full
+ingestion pipeline ran twice per Dagster materialization. `ingest_one`'s
+idempotency (skip-if-already-ingested) masked this as "harmless" on a
+second run, but it was still two full-pipeline invocations per graph
+execution, two conflicting sets of asset metadata for what is one
+physical operation, and exactly the "duplicate ingestion" anti-pattern
+the architecture recovery task calls out. Collapsed into one `bronze`
+asset: one operation, one Dagster node, one responsibility.
+
+P0.44 fix: a `dbt` asset was missing entirely -- the warehouse's gold
+tables were loaded into Postgres but nothing in the graph ever ran
+`dbt run`/`dbt test` to materialize the `marts` schema dashboards
+depend on, or to gate ML feature engineering on dbt's own data-quality
+tests passing. pipelines/common/dbt_runner.py already existed
+(DbtError/DBT_ERROR category included) but was never called from here.
 """
 
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dagster import AssetExecutionContext, MetadataValue, asset
+from pipelines.common.dbt_runner import run_dbt
 from pipelines.common.errors import PipelineError, classify_exception
 from pipelines.common.logging_config import PipelineStageLogger
 from pipelines.common.settings import get_postgres_settings
@@ -93,25 +118,13 @@ def _track_asset_run(context: AssetExecutionContext, stage: str, handler):
         raise pipeline_error from exc
 
 
-@asset(group_name="ingestion")
-def ingestion(context: AssetExecutionContext) -> dict:
-    """Materializes the inbound semester extract into bronze data."""
-
-    def _run() -> dict:
-        results = ingest_all()
-        counts = {}
-        for item in results:
-            counts[item["status"]] = counts.get(item["status"], 0) + 1
-        return {"records_processed": sum(item.get("rows", 0) for item in results if item.get("status") == "SUCCESS"), "result_counts": counts}
-
-    result = _track_asset_run(context, "ingestion", _run)
-    context.add_output_metadata({"result_counts": MetadataValue.json(result["result_counts"]), "records_processed": result["records_processed"]})
-    return result
-
-
-@asset(group_name="bronze", deps=[ingestion])
+@asset(group_name="bronze")
 def bronze(context: AssetExecutionContext) -> dict:
-    """Persists the bronze layer and ensures the ingestion output is available for downstream cleaning."""
+    """Reads the data_generator's source extract, validates it at the
+    file level, and lands it in Bronze -- the pipeline's one ingestion
+    operation (see module docstring: this used to be split across two
+    assets that each ran the full ingestion, which is why this is now a
+    single asset with no upstream Dagster dependency)."""
 
     def _run() -> dict:
         results = ingest_all()
@@ -199,18 +212,58 @@ def warehouse(context: AssetExecutionContext) -> dict:
     return result
 
 
-@asset(group_name="features", deps=[warehouse])
+@asset(group_name="dbt", deps=[warehouse])
+def dbt(context: AssetExecutionContext) -> dict:
+    """Runs the dbt staging/marts layer against the warehouse-loaded gold
+    schema, then dbt's own tests (unique/not_null/relationships/
+    accepted_values). This is the data-quality gate between raw Gold and
+    everything downstream: `run_dbt` raises DbtError on any non-zero dbt
+    exit code (dbt run OR dbt test), which fails this asset and -- via
+    normal Dagster dependency propagation -- prevents `features` from
+    executing on a Gold snapshot that failed its own quality tests."""
+
+    def _run() -> dict:
+        run_output = run_dbt(["run"], stage="dbt run")
+        test_output = run_dbt(["test"], stage="dbt test")
+        return {
+            "records_processed": 0,  # dbt materializes views/tables, not a row count this stage owns
+            "run_log_lines": len(run_output.splitlines()),
+            "test_log_lines": len(test_output.splitlines()),
+        }
+
+    result = _track_asset_run(context, "dbt", _run)
+    context.add_output_metadata({
+        "run_log_lines": result["run_log_lines"],
+        "test_log_lines": result["test_log_lines"],
+    })
+    return result
+
+
+@asset(group_name="features", deps=[dbt])
 def features(context: AssetExecutionContext) -> dict:
-    """Builds leakage-safe forecasting features from the warehouse-backed gold data."""
+    """Builds leakage-safe forecasting features from the warehouse-backed
+    gold data, gated on `dbt` having already passed (both `dbt run` and
+    `dbt test`) -- see the `dbt` asset's docstring."""
 
     def _run() -> dict:
         password = get_postgres_settings().require_pipeline_writer_password()
         engine = build_pipeline_writer_engine(password)
-        row_count = build_and_store_ml_features(engine)
-        return {"records_processed": row_count, "row_count": row_count}
+        build_result = build_and_store_ml_features(engine)
+        return {
+            "records_processed": build_result.total_rows,
+            "program_rows": build_result.program_rows,
+            "year_level_rows": build_result.year_level_rows,
+            "program_fingerprint": build_result.program_fingerprint,
+            "year_level_fingerprint": build_result.year_level_fingerprint,
+        }
 
     result = _track_asset_run(context, "features", _run)
-    context.add_output_metadata({"rows": result["row_count"]})
+    context.add_output_metadata({
+        "program_rows": result["program_rows"],
+        "year_level_rows": result["year_level_rows"],
+        "program_fingerprint": result["program_fingerprint"],
+        "year_level_fingerprint": result["year_level_fingerprint"],
+    })
     return result
 
 
@@ -261,12 +314,12 @@ def forecast(context: AssetExecutionContext) -> dict:
 
 
 all_assets = [
-    ingestion,
     bronze,
     silver,
     validation,
     gold,
     warehouse,
+    dbt,
     features,
     training,
     evaluation,
