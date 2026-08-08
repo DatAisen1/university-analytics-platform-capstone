@@ -27,15 +27,12 @@ interface instead of a concrete backend.
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from pipelines.common.config import ConfigError
-from pipelines.common.config import ConfigError
 from pipelines.common.errors import MinioError
 
 
@@ -228,27 +225,18 @@ class S3Storage(ObjectStorage):
 
 
 def load_minio_storage_from_env(bucket_env_var: str, env: Optional[dict] = None) -> S3Storage:
-    """Build an S3Storage pointed at MinIO using the same env vars defined
-    in .env.example (Day 2). `bucket_env_var` is which bucket-name env var
-    to use, e.g. 'MINIO_BRONZE_BUCKET'.
-
-    A full pydantic-settings Settings object (flagged as a gap since
-    Day 3's review) is still not built -- this is a narrowly-scoped helper
-    for exactly this one need, not a substitute for that broader piece.
+    """Build an S3Storage pointed at MinIO using pipelines.common.settings'
+    centralized MinioSettings domain (P0.12). `bucket_env_var` is which
+    bucket-name field to use, e.g. 'MINIO_BRONZE_BUCKET'. `env` is
+    forwarded to settings.get_minio_settings -- pass an explicit mapping
+    (as tests do) to bypass the real process environment.
     """
-    env = env if env is not None else os.environ
-    required = ["MINIO_ENDPOINT", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD", bucket_env_var]
-    missing = [k for k in required if not env.get(k)]
-    if missing:
-        raise ConfigError(f"Missing required environment variable(s) for MinIO storage: {missing}")
+    from pipelines.common.settings import get_minio_settings
 
-    endpoint = env["MINIO_ENDPOINT"]
-    if not endpoint.startswith("http"):
-        endpoint = f"http://{endpoint}"
-
+    settings = get_minio_settings(env)
     return S3Storage(
-        endpoint_url=endpoint,
-        access_key=env["MINIO_ROOT_USER"],
-        secret_key=env["MINIO_ROOT_PASSWORD"],
-        bucket=env[bucket_env_var],
+        endpoint_url=settings.endpoint_url,
+        access_key=settings.MINIO_ROOT_USER,
+        secret_key=settings.MINIO_ROOT_PASSWORD,
+        bucket=settings.bucket_for(bucket_env_var),
     )

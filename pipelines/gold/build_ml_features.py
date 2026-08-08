@@ -247,11 +247,10 @@ def build_and_store_ml_features(engine) -> dict:
 
 
 if __name__ == "__main__":
-    import os
-
+    from pipelines.common.settings import get_postgres_settings
     from pipelines.gold.load_gold_to_postgres import build_pipeline_writer_engine
 
-    password = os.environ["PIPELINE_WRITER_PASSWORD"]
+    password = get_postgres_settings().require_pipeline_writer_password()
     engine = build_pipeline_writer_engine(password)
     summary = build_and_store_ml_features(engine)
     for key, value in summary.items():

@@ -7,7 +7,6 @@ ingestion -> bronze -> silver -> validation -> gold -> warehouse ->
 features -> training -> evaluation -> forecast.
 """
 
-import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +14,7 @@ from pathlib import Path
 from dagster import AssetExecutionContext, MetadataValue, asset
 from pipelines.common.errors import PipelineError, classify_exception
 from pipelines.common.logging_config import PipelineStageLogger
+from pipelines.common.settings import get_postgres_settings
 from models.forecasting.deploy_forecast import deploy_forecasts
 from models.forecasting.train_prophet import evaluate_all_series, train_final_models, write_evaluation_report
 from pipelines.common.metadata import get_connection, record_pipeline_run
@@ -189,7 +189,7 @@ def warehouse(context: AssetExecutionContext) -> dict:
     """Loads the gold layer into the warehouse so downstream ML assets consume validated data."""
 
     def _run() -> dict:
-        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        password = get_postgres_settings().require_pipeline_writer_password()
         engine = build_pipeline_writer_engine(password)
         counts = load_gold_to_postgres(engine)
         return {"records_processed": sum(counts.values()), "row_counts": counts}
@@ -204,7 +204,7 @@ def features(context: AssetExecutionContext) -> dict:
     """Builds leakage-safe forecasting features from the warehouse-backed gold data."""
 
     def _run() -> dict:
-        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        password = get_postgres_settings().require_pipeline_writer_password()
         engine = build_pipeline_writer_engine(password)
         row_count = build_and_store_ml_features(engine)
         return {"records_processed": row_count, "row_count": row_count}
@@ -219,7 +219,7 @@ def training(context: AssetExecutionContext) -> dict:
     """Trains forecasting models for each series after the feature layer is ready."""
 
     def _run() -> dict:
-        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        password = get_postgres_settings().require_pipeline_writer_password()
         engine = build_pipeline_writer_engine(password)
         saved_paths = train_final_models(engine)
         return {"records_processed": len(saved_paths), "saved_paths": saved_paths}
@@ -234,7 +234,7 @@ def evaluation(context: AssetExecutionContext) -> dict:
     """Runs walk-forward evaluation and writes the evaluation report for the trained models."""
 
     def _run() -> dict:
-        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        password = get_postgres_settings().require_pipeline_writer_password()
         engine = build_pipeline_writer_engine(password)
         report = evaluate_all_series(engine)
         csv_path, md_path = write_evaluation_report(report)
@@ -250,7 +250,7 @@ def forecast(context: AssetExecutionContext) -> dict:
     """Deploys the promoted forecasting model to produce the next period forecast."""
 
     def _run() -> dict:
-        password = os.environ["PIPELINE_WRITER_PASSWORD"]
+        password = get_postgres_settings().require_pipeline_writer_password()
         engine = build_pipeline_writer_engine(password)
         deployments = deploy_forecasts(engine)
         return {"records_processed": len(deployments), "deployments": [deployment.__dict__ for deployment in deployments]}

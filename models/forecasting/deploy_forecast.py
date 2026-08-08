@@ -309,12 +309,11 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
 
 
 if __name__ == "__main__":
-    import os
-
+    from pipelines.common.settings import get_postgres_settings
     from pipelines.gold.load_gold_to_postgres import build_pipeline_writer_engine
 
     logging.basicConfig(level=logging.INFO)
-    password = os.environ["PIPELINE_WRITER_PASSWORD"]
+    password = get_postgres_settings().require_pipeline_writer_password()
     engine = build_pipeline_writer_engine(password)
 
     print("Running retrain-gated champion/candidate/promote forecast deployment...")

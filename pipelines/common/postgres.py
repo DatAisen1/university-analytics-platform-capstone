@@ -18,13 +18,12 @@ Mixing them would force secrets into a version-controlled file.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
 from pipelines.common.errors import PostgresError
 import psycopg2
 
-from pipelines.common.config import ConfigError
+from pipelines.common.settings import SettingsError, get_postgres_settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DDL_DIR = _REPO_ROOT / "warehouse" / "ddl"
@@ -34,17 +33,16 @@ SERVICE_ROLES = ["pipeline_writer", "dbt_role", "dashboard_reader", "analyst_rea
 
 def get_admin_connection(env: Optional[dict] = None):
     """Connect as the admin/superuser role (POSTGRES_USER), the only role
-    allowed to create schemas/roles/grants."""
-    env = env if env is not None else os.environ
-    required = ["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"]
-    missing = [k for k in required if not env.get(k)]
-    if missing:
-        raise ConfigError(f"Missing required environment variable(s) for Postgres admin connection: {missing}")
+    allowed to create schemas/roles/grants. `env` is forwarded to
+    pipelines.common.settings.get_postgres_settings -- pass an explicit
+    mapping (as every test in this repo does) to bypass the real process
+    environment, or leave it None to read .env / the real environment."""
+    settings = get_postgres_settings(env).require_admin_credentials()
 
     try:
         return psycopg2.connect(
-            host=env["POSTGRES_HOST"], port=env["POSTGRES_PORT"], dbname=env["POSTGRES_DB"],
-            user=env["POSTGRES_USER"], password=env["POSTGRES_PASSWORD"],
+            host=settings.POSTGRES_HOST, port=settings.POSTGRES_PORT, dbname=settings.POSTGRES_DB,
+            user=settings.POSTGRES_USER, password=settings.POSTGRES_PASSWORD,
         )
     except psycopg2.OperationalError as exc:
         raise PostgresError(
@@ -59,14 +57,10 @@ def get_role_connection(role: str, password: str, env: Optional[dict] = None):
     Postgres itself, not just documented."""
     if role not in SERVICE_ROLES:
         raise ValueError(f"Unknown role {role!r}. Known roles: {SERVICE_ROLES}")
-    env = env if env is not None else os.environ
-    required = ["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB"]
-    missing = [k for k in required if not env.get(k)]
-    if missing:
-        raise ConfigError(f"Missing required environment variable(s) for Postgres connection: {missing}")
+    settings = get_postgres_settings(env)
 
     return psycopg2.connect(
-        host=env["POSTGRES_HOST"], port=env["POSTGRES_PORT"], dbname=env["POSTGRES_DB"],
+        host=settings.POSTGRES_HOST, port=settings.POSTGRES_PORT, dbname=settings.POSTGRES_DB,
         user=role, password=password,
     )
 
@@ -79,7 +73,7 @@ def bootstrap_roles(admin_conn, passwords: Dict[str, str]) -> None:
     """
     missing = set(SERVICE_ROLES) - set(passwords)
     if missing:
-        raise ConfigError(f"Missing password(s) for role(s): {sorted(missing)}")
+        raise SettingsError(f"Missing password(s) for role(s): {sorted(missing)}")
 
     admin_conn.autocommit = True
     with admin_conn.cursor() as cur:
@@ -183,12 +177,7 @@ if __name__ == "__main__":
 
     # SERVICE_ROLES = ["pipeline_writer", "dbt_role", "dashboard_reader", "analyst_readonly"]
     # -- keys here must match those exactly; bootstrap_roles() looks them up by name.
-    passwords = {
-        "pipeline_writer": os.environ.get("PIPELINE_WRITER_PASSWORD", ""),
-        "dbt_role": os.environ.get("DBT_ROLE_PASSWORD", ""),
-        "dashboard_reader": os.environ.get("DASHBOARD_READER_PASSWORD", ""),
-        "analyst_readonly": os.environ.get("ANALYST_READONLY_PASSWORD", ""),
-    }
+    passwords = get_postgres_settings().service_role_passwords()
     missing = [role for role, pw in passwords.items() if not pw]
     if missing:
         print(

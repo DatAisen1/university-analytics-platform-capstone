@@ -46,12 +46,16 @@ def _read_parquet(storage: ObjectStorage, key: str) -> pd.DataFrame:
 
 
 def build_pipeline_writer_engine(password: str, env: Optional[dict] = None):
-    import os
-    env = env if env is not None else os.environ
-    host = env.get("POSTGRES_HOST", "localhost")
-    port = env.get("POSTGRES_PORT", "5432")
-    db = env.get("POSTGRES_DB", "university_analytics")
-    return create_engine(f"postgresql+psycopg2://pipeline_writer:{password}@{host}:{port}/{db}")
+    """Build a SQLAlchemy engine connected as pipeline_writer. `env` is
+    forwarded to pipelines.common.settings.get_postgres_settings -- pass
+    an explicit mapping (as tests do) to bypass the real process
+    environment."""
+    from pipelines.common.settings import get_postgres_settings
+
+    settings = get_postgres_settings(env)
+    return create_engine(
+        f"postgresql+psycopg2://pipeline_writer:{password}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+    )
 
 
 def load_silver_to_postgres(
@@ -86,8 +90,9 @@ def load_silver_to_postgres(
 
 
 if __name__ == "__main__":
-    import os
-    password = os.environ["PIPELINE_WRITER_PASSWORD"]
+    from pipelines.common.settings import get_postgres_settings
+
+    password = get_postgres_settings().require_pipeline_writer_password()
     engine = build_pipeline_writer_engine(password)
     counts = load_silver_to_postgres(engine)
     print("Silver -> Postgres load complete:")

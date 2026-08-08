@@ -27,10 +27,14 @@ Usage (after `docker compose up -d` / `make up`, with .env populated):
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from pipelines.common.settings import MinioSettings, SettingsError, get_minio_settings
 
 
 @dataclass
@@ -41,23 +45,18 @@ class BucketReport:
     sample_keys: List[str]
 
 
-def _load_env() -> dict:
-    missing = [
-        k
-        for k in ("MINIO_ENDPOINT", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD")
-        if not os.environ.get(k)
-    ]
-    if missing:
-        print(f"Missing required environment variable(s): {missing}")
+def _load_settings() -> MinioSettings:
+    # Reuse the project's own centralized settings (pipelines.common.settings)
+    # rather than reading os.environ directly here -- one place defines "how
+    # MinIO config is loaded," same as the rest of this codebase (P0.12).
+    try:
+        return get_minio_settings()
+    except SettingsError as exc:
+        print(f"{exc.message}")
         print("Run: cp .env.example .env (if you haven't), fill in real values, then:")
         print("    export $(grep -v '^#' .env | xargs)")
         print("before running this script -- or run it via `make verify-minio`.")
         sys.exit(1)
-    return {
-        "endpoint": os.environ["MINIO_ENDPOINT"],
-        "access_key": os.environ["MINIO_ROOT_USER"],
-        "secret_key": os.environ["MINIO_ROOT_PASSWORD"],
-    }
 
 
 def _build_client(endpoint: str, access_key: str, secret_key: str):
@@ -133,14 +132,14 @@ def main() -> int:
     parser.add_argument("--prefix", default="", help="Optional key prefix to filter within each bucket.")
     args = parser.parse_args()
 
-    env = _load_env()
+    settings = _load_settings()
     buckets = args.buckets or [
-        os.environ.get("MINIO_BRONZE_BUCKET", "bronze"),
-        os.environ.get("MINIO_SILVER_BUCKET", "silver"),
-        os.environ.get("MINIO_GOLD_BUCKET", "gold"),
+        settings.MINIO_BRONZE_BUCKET,
+        settings.MINIO_SILVER_BUCKET,
+        settings.MINIO_GOLD_BUCKET,
     ]
 
-    client = _build_client(env["endpoint"], env["access_key"], env["secret_key"])
+    client = _build_client(settings.endpoint_url, settings.MINIO_ROOT_USER, settings.MINIO_ROOT_PASSWORD)
 
     print("== Channel 1: Python client (boto3) -- ground truth for this run ==")
     any_empty = False
@@ -160,10 +159,9 @@ def main() -> int:
             any_empty = True
     print()
 
-    console_port = os.environ.get("MINIO_CONSOLE_PORT", "9001")
-    console_host = env["endpoint"].split(":")[0].replace("http://", "").replace("https://", "")
-    print_cli_instructions(env["endpoint"], buckets)
-    print_console_instructions(f"http://{console_host}:{console_port}", buckets)
+    console_host = settings.MINIO_ENDPOINT.replace("http://", "").replace("https://", "").split(":")[0]
+    print_cli_instructions(settings.MINIO_ENDPOINT, buckets)
+    print_console_instructions(f"http://{console_host}:{settings.MINIO_CONSOLE_PORT}", buckets)
 
     if any_empty:
         print("RESULT: at least one bucket had no objects or could not be queried -- do NOT treat a")
