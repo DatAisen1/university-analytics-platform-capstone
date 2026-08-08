@@ -12,24 +12,38 @@ The generator's job is not "produce random rows" — it's to produce a dataset t
 
 > **Reference-data note:** colleges, programs, and the academic calendar are **not** duplicated here. `data_generator` reads `configs/colleges.yaml`, `configs/programs.yaml`, and `configs/academic_calendar.yaml` via `pipelines/common/config.py` — repeating that mapping in a second file would violate the single-source-of-truth principle those configs exist to enforce.
 
+> **Drift correction (P0.34-P0.37):** this section previously described a
+> planned structure (`generate_enrollment.py`, `generate_all.py`) that did
+> not match the files actually in the repository. The listing below is
+> the **actual, current** structure. `generate_all.py` now exists for
+> real — see §12.
+
 ```
 data_generator/
 ├── config/
 │   ├── volumes.yaml                # cohort sizes, college/gender/admission-type weights, risk-profile params
+│   ├── admissions_rules.yaml        # yield/acceptance-rate ranges for the derived admissions funnel
+│   ├── progression_rules.yaml       # dropout/graduation/shifter probability parameters
 │   └── noise_rules.yaml             # typo rate, duplicate rate, late-correction rate
 ├── generators/
 │   ├── generate_students.py
-│   ├── generate_enrollment.py
+│   ├── generate_admissions.py       # derives the applicants/accepted funnel FROM real enrollment
 │   ├── generate_progression.py     # drives dropout/graduation/shifter logic across all year levels
-│   └── generate_all.py             # orchestrates generation order
+│   ├── apply_noise.py               # final stage: injects realistic messiness (typos/dupes/late corrections)
+│   └── generate_all.py             # orchestrates generation order end-to-end; writes manifest.json
 ├── rules/
 │   ├── progression_rules.py        # probability model for student outcomes
 │   └── noise_injection.py          # typos, duplicates, nulls
+├── validation/
+│   └── generate_validation_report.py  # pre-ingestion self-check, run before apply_noise (see §12)
 └── output/
     ├── student_master.csv           # cohort-level, generated once — not semester-scoped
     ├── _internal/                    # generator-only state, NEVER treated as source data downstream
     │   └── student_latent_profiles.csv   # per-student risk_score; a real SIS has no such column
-    └── {academic_year}/{semester_number}/*.csv  # e.g. output/2022-2023/1/enrollment.csv
+    ├── {academic_year}/admissions.csv           # e.g. output/2022-2023/admissions.csv
+    ├── {academic_year}/{semester_name}/*.csv    # e.g. output/2022-2023/1st Semester/enrollment.csv
+    ├── validation_report.txt        # written by generate_all.py / generate_validation_report.py
+    └── manifest.json                 # written by generate_all.py -- see §12
 ```
 
 The output path segment is the **school-year label** (`2022-2023`), never a bare single year — this is the one place the old model's naming would silently corrupt everything downstream if left unfixed, since ingestion partitions Bronze directly off this folder structure (`05_Medallion_Architecture.md` §2).
@@ -177,6 +191,93 @@ The generator only simulates students **entering** during the observed window �
 **A measurement lesson worth keeping regardless of academic-year model:** the late-correction rate must be measured against the count of rows *eligible* to receive a late correction (i.e., excluding the final in-scope semester, `2023-2024`'s 2nd Semester, which has no later partition to be "corrected into"), not against the total row count — otherwise the observed rate will look artificially low and read as a bug when it isn't.
 
 **Testing:** `tests/unit/test_apply_noise.py` keeps its structure; rate-check fixtures need re-running against the regenerated 6-semester dataset.
+
+## 12. Dataset Specification & Deterministic Regeneration (P0.34-P0.37)
+
+### Dataset specification
+
+| Entity | Source of truth | Grain |
+|---|---|---|
+| Academic years | `configs/academic_calendar.yaml` (3: `2021-2022`, `2022-2023`, `2023-2024`) | one row/partition per academic year |
+| Academic periods (semesters) | `configs/academic_calendar.yaml` (2 per year = 6 total) | one partition per (academic_year, semester_name) |
+| Colleges | `configs/colleges.yaml` (8) | one row per college |
+| Programs | `configs/programs.yaml` (37) | one row per program, FK to college |
+| Student counts | `data_generator/config/volumes.yaml: cohort_sizes` (entering students per cohort year) | one row per student in `student_master.csv` |
+| Applicants / Accepted | `data_generator/config/admissions_rules.yaml`, **derived** from real enrolled freshmen (never sampled independently) | one row per (academic_year, college, program) in `{academic_year}/admissions.csv` |
+| Enrollment | `generate_progression.py`, one record per student per semester they're active | `{academic_year}/{semester_name}/enrollment.csv` |
+| Gender | `volumes.yaml: gender_weights`, sampled per student at cohort entry | field on `student_master.csv` |
+
+Every entity's schema, weight keys, and academic-period set are
+cross-validated against `configs/*.yaml` at generation time (e.g.
+`validate_college_weights_match_reference`) — a config that references a
+college/program not present in the reference data fails loudly before any
+row is written, rather than producing orphaned rows.
+
+### Seeding (P0.35)
+
+Every generator draws from its own explicit, independent
+`random_seed` in its own config file — deliberately **not** a single
+shared seed, so a change to one stage's random draws (e.g. widening
+`noise_rules.yaml`'s duplicate rate) can never silently shift another
+stage's output:
+
+| Stage | Config | Seed |
+|---|---|---|
+| `generate_students` | `volumes.yaml` | 42 |
+| `generate_progression` | `progression_rules.yaml` | 43 |
+| `apply_noise` | `noise_rules.yaml` | 44 |
+| `generate_admissions` | `admissions_rules.yaml` | 45 |
+
+### Deterministic, from-scratch regeneration (P0.36)
+
+`data_generator/generators/generate_all.py` is the single authoritative
+orchestrator. It runs every stage in dependency order, runs the
+pre-ingestion validator, and writes `output/manifest.json` recording the
+seeds, config file hashes, `DATASET_SCHEMA_VERSION`, and row counts that
+produced the dataset:
+
+```bash
+python -m data_generator.generators.generate_all
+```
+
+By default this **clears `data_generator/output/` first**, so a run
+always starts from scratch; pass `--no-clean` to generate into an
+existing directory instead. Two runs with the same seeds and the same
+config file contents produce byte-identical output (proven by
+`tests/integration/test_generate_all_determinism.py`).
+
+Stage order matters and is enforced by the orchestrator:
+
+```text
+generate_students -> generate_admissions -> generate_progression
+    -> pre-ingestion validation -> apply_noise
+```
+
+Validation runs **before** `apply_noise`, not after — `apply_noise`
+deliberately injects duplicate submissions, typos, and late corrections
+so Silver's dedup/cleaning logic has real messiness to prove itself
+against (see §11). Running the validator after noise injection would
+make its "zero duplicate records" check permanently fail by design; it
+exists to catch genuine generator bugs (bad foreign keys, missing
+academic periods, impossible year-level transitions) in the clean,
+pre-noise output, not to police the intentional noise.
+
+### Validation before ingestion (P0.37)
+
+`data_generator/validation/generate_validation_report.py` (invoked
+automatically by `generate_all.py`, or standalone) checks, over the
+pre-noise output:
+
+- every academic year and semester in `configs/academic_calendar.yaml` is present;
+- every year level (Freshman → Super Senior) is represented;
+- zero duplicate enrollment records (natural key: student_id, academic_year, semester);
+- zero schema violations (Bronze pandera shape check reused directly against the raw CSVs);
+- zero orphan student/program/college references;
+- zero impossible year-level transitions (reuses Silver's own detector).
+
+A failing check causes `generate_all.py` to raise instead of writing a
+"successful"-looking dataset — a bad generator run must not silently
+reach Bronze ingestion.
 
 ---
 *Next: `09_Data_Science.md` — the Success Rate model.*
