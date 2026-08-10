@@ -61,7 +61,7 @@ import pandas as pd
 
 from pipelines.common.academic_periods import academic_year_start_year
 from pipelines.common.metadata import get_connection, record_run
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 from pipelines.silver.cleaning_rules import (
     make_categorical_normalizer,
     normalize_enrollment_status_safe,
@@ -388,8 +388,8 @@ def clean_all(
 ) -> List[Dict[str, object]]:
     """Clean every entity's full Bronze dataset and write one Silver
     Parquet file per entity. Returns per-entity summaries."""
-    bronze_storage = bronze_storage or LocalFileStorage(DEFAULT_BRONZE_STORAGE_PATH)
-    silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
+    bronze_storage = bronze_storage or load_storage_from_env(DEFAULT_BRONZE_STORAGE_PATH, "MINIO_BRONZE_BUCKET")
+    silver_storage = silver_storage or load_storage_from_env(DEFAULT_SILVER_STORAGE_PATH, "MINIO_SILVER_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
     entities = entities or ALL_ENTITIES

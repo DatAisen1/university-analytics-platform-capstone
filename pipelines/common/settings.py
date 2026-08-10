@@ -235,10 +235,44 @@ class MinioSettings(_DomainSettings):
 
 class PipelineSettings(_DomainSettings):
     """Cross-cutting pipeline runtime settings (Task 63's logging, and
-    the dev/staging/prod environment marker)."""
+    the dev/staging/prod environment marker).
+
+    STORAGE_BACKEND (P1 fix -- see pipelines/common/storage.py's
+    load_storage_from_env): the single switch that decides whether every
+    pipeline stage's *default* ObjectStorage is LocalFileStorage (disk)
+    or S3Storage (MinIO/S3). Before this field existed, every stage's
+    default was hardcoded to LocalFileStorage, and the only way to
+    reach MinIO was a second, README-undocumented entrypoint
+    (scripts/run_pipeline_with_minio.py) that no orchestration code
+    (Dagster's orchestration/assets.py included) ever called -- so
+    MinIO was architecturally present but never actually exercised by
+    a real pipeline run. 'local' preserves that exact previous default
+    behavior (nothing changes for existing dev/CI/test workflows);
+    'minio' makes every default entrypoint -- including Dagster's --
+    write through S3Storage instead, no code changes required at the
+    call site.
+    """
 
     ENVIRONMENT: str = "dev"
     LOG_LEVEL: str = "INFO"
+    STORAGE_BACKEND: str = "local"
+
+    def require_valid_storage_backend(self) -> str:
+        """Validate + normalize STORAGE_BACKEND once, at the boundary,
+        instead of letting an unrecognized value (a typo, e.g. 'minoi')
+        silently fall through to whichever branch happens to be the
+        `else` case. Mirrors require_admin_credentials()'s pattern of
+        raising a specific SettingsError instead of failing several
+        frames later with a confusing error."""
+        backend = self.STORAGE_BACKEND.strip().lower()
+        if backend not in ("local", "minio"):
+            raise SettingsError(
+                f"Invalid STORAGE_BACKEND={self.STORAGE_BACKEND!r}. "
+                f"Expected 'local' (default; LocalFileStorage on disk) or "
+                f"'minio' (S3Storage against MinIO/S3, requires MINIO_* "
+                f"settings -- see .env.example)."
+            )
+        return backend
 
 
 class DagsterSettings(_DomainSettings):

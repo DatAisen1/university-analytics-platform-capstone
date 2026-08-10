@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import io
 import os
+import uuid
 from typing import Dict
 
 import pandas as pd
+import psycopg2
 import pytest
 from sqlalchemy import create_engine, text
 
@@ -48,6 +50,26 @@ ROLE_PASSWORDS = {
     "analyst_readonly": "pw_analyst123",
 }
 
+# P1 fix (test isolation): this module's whole point is to DROP and
+# recreate the warehouse's schemas -- that is destructive by design, and
+# destructive-by-design must never share a database with any other test
+# module. Previously this fixture ran its drop/rebuild against
+# TEST_ENV["POSTGRES_DB"] directly -- the SAME database every other
+# integration test module (e.g. test_database_constraints.py) also
+# bootstraps against in the same pytest session. Whichever module ran
+# after this one inherited a mid-drop or freshly-stubbed database it
+# never asked for. The fix is not "run this file alone" or "reorder
+# tests" (both are band-aids that break the next time someone adds a
+# test file) -- it's giving this module a database of its own, created
+# and destroyed entirely within this module's fixture, so nothing it
+# does can ever leak into another module's state.
+_REBUILD_DB_NAME = f"{TEST_ENV['POSTGRES_DB']}_rebuild_test_{uuid.uuid4().hex[:8]}"
+
+# The env every test/fixture in this module actually talks to -- same
+# cluster/credentials as TEST_ENV, but pointed at this module's own
+# throwaway database instead of the shared one.
+REBUILD_ENV = {**TEST_ENV, "POSTGRES_DB": _REBUILD_DB_NAME}
+
 
 def _postgres_available() -> bool:
     try:
@@ -62,6 +84,37 @@ pytestmark = pytest.mark.skipif(
     not _postgres_available(),
     reason="No reachable Postgres instance for these tests -- see module docstring",
 )
+
+
+def _maintenance_connection():
+    """A connection to Postgres's own `postgres` maintenance database --
+    NOT to `_REBUILD_DB_NAME` or TEST_ENV["POSTGRES_DB"] -- because
+    CREATE DATABASE / DROP DATABASE cannot run against the database you
+    are currently connected to. Autocommit is required: both statements
+    are disallowed inside a transaction block."""
+    conn = psycopg2.connect(
+        host=TEST_ENV["POSTGRES_HOST"], port=TEST_ENV["POSTGRES_PORT"], dbname="postgres",
+        user=TEST_ENV["POSTGRES_USER"], password=TEST_ENV["POSTGRES_PASSWORD"],
+    )
+    conn.autocommit = True
+    return conn
+
+
+def _drop_rebuild_database_if_exists() -> None:
+    """Terminate any lingering connections to `_REBUILD_DB_NAME` (a
+    previous interrupted run, e.g. a killed test process, can leave one
+    open -- DROP DATABASE refuses to run while any session is attached)
+    then drop it. Safe to call whether or not the database exists."""
+    with _maintenance_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                WHERE datname = %s AND pid <> pg_backend_pid()
+                """,
+                (_REBUILD_DB_NAME,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{_REBUILD_DB_NAME}"')
 
 
 class _InMemoryStorage(ObjectStorage):
@@ -96,41 +149,53 @@ class _InMemoryStorage(ObjectStorage):
 
 @pytest.fixture(scope="module", autouse=True)
 def clean_database():
-    """Recreates roles + applies every migration against a completely
-    fresh database -- the exact sequence `docker compose down -v` +
-    redeploy would require.
+    """Creates a brand-new, module-private database and applies every
+    migration against it -- the exact sequence `docker compose down -v`
+    + redeploy would require, but scoped to a database only this module
+    ever touches.
 
-    P0.54 bug fix: this used to drop only bronze/silver/gold/marts/meta,
-    never `public`. Alembic's own bookkeeping table (`alembic_version`)
-    lives in `public`, so a database that had already been migrated by
-    an earlier test module (e.g. test_database_constraints.py's own
-    module-scoped bootstrap) kept its alembic_version row across this
-    "clean" -- Alembic then saw "already at head" and silently declined
-    to recreate anything, leaving every table this module's tests expect
-    simply gone, with no error. Dropping `public` too (and recreating
-    it, since Postgres always expects a `public` schema to exist) makes
-    this fixture an actual clean rebuild instead of one that only works
-    by accident on a database no other test has touched yet. See
+    P0.54 bug fix (kept, still relevant): Alembic's own bookkeeping table
+    (`alembic_version`) lives in `public`. A database that had already
+    been migrated once and only had bronze/silver/gold/marts/meta
+    dropped -- not `public` -- would keep its alembic_version row,
+    Alembic would see "already at head" and silently decline to recreate
+    anything, and every table this module's tests expect would simply be
+    gone with no error (see
     pipelines.common.migrations.apply_migrations's
-    _expected_schemas_missing check for the matching production-side
-    guard against this same class of drift.
-    """
-    admin_conn = get_admin_connection(TEST_ENV)
-    with admin_conn.cursor() as cur:
-        for schema in ("bronze", "silver", "gold", "marts", "meta"):
-            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-        cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
-        cur.execute("CREATE SCHEMA public")
-    admin_conn.commit()
-    admin_conn.close()
+    _expected_schemas_missing guard, which exists specifically to catch
+    this). Creating a genuinely fresh database via CREATE DATABASE makes
+    that whole failure mode structurally impossible here: there is no
+    pre-existing `public.alembic_version` row to survive anything,
+    because there is no pre-existing database at all.
 
-    bootstrap_warehouse(ROLE_PASSWORDS, env=TEST_ENV)
+    Test-isolation fix (this fixture's main change): previously this
+    dropped and rebuilt schemas inside TEST_ENV["POSTGRES_DB"] -- the
+    same database every other integration test module shares in a
+    single pytest run. That let this module's schema drops leak into
+    whichever module pytest happened to run next. Operating on
+    `_REBUILD_DB_NAME`, a database that exists only for the lifetime of
+    this fixture, removes the shared-state dependency entirely: nothing
+    this module does can affect any other module, and nothing any other
+    module does can affect this one.
+    """
+    _drop_rebuild_database_if_exists()
+    with _maintenance_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{_REBUILD_DB_NAME}"')
+
+    # bootstrap_roles (inside bootstrap_warehouse) creates the four
+    # service roles at the CLUSTER level, not per-database -- Postgres
+    # roles are cluster-wide -- so this is safe/idempotent even if
+    # another test module already created them in the same cluster.
+    bootstrap_warehouse(ROLE_PASSWORDS, env=REBUILD_ENV)
     yield
+
+    _drop_rebuild_database_if_exists()
 
 
 @pytest.fixture
 def engine():
-    host, port, db = TEST_ENV["POSTGRES_HOST"], TEST_ENV["POSTGRES_PORT"], TEST_ENV["POSTGRES_DB"]
+    host, port, db = REBUILD_ENV["POSTGRES_HOST"], REBUILD_ENV["POSTGRES_PORT"], REBUILD_ENV["POSTGRES_DB"]
     return create_engine(
         f"postgresql+psycopg2://pipeline_writer:{ROLE_PASSWORDS['pipeline_writer']}@{host}:{port}/{db}"
     )
@@ -280,4 +345,4 @@ class TestFkConnectedReloadIdempotency:
         with engine.connect() as conn:
             for table_name in tables:
                 row_count = conn.execute(text(f"SELECT COUNT(*) FROM gold.{table_name}")).scalar()
-                assert row_count == 1, f"gold.{table_name} should have exactly 1 row after two identical loads"
+                assert row_count == 1, f"gold.{table_name} should have exactly 1 row after two identical loads" 

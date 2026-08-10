@@ -76,7 +76,7 @@ def test_load_gold_to_postgres_matches_parquet_row_counts(tmp_path):
     gold_storage.write_bytes(f"gold/{scratch_table}/data.parquet", buf.getvalue())
 
     engine = create_engine(
-        f"postgresql+psycopg2://uap_admin:local_dev_password@"
+        f"postgresql+psycopg2://{TEST_ENV['POSTGRES_USER']}:{TEST_ENV['POSTGRES_PASSWORD']}@"
         f"{TEST_ENV['POSTGRES_HOST']}:{TEST_ENV['POSTGRES_PORT']}/{TEST_ENV['POSTGRES_DB']}"
     )
     try:
@@ -109,7 +109,7 @@ def test_load_gold_to_postgres_survives_dependent_views_on_reload(tmp_path):
     gold_storage.write_bytes(f"gold/{scratch_table}/data.parquet", buf.getvalue())
 
     engine = create_engine(
-        f"postgresql+psycopg2://uap_admin:local_dev_password@"
+        f"postgresql+psycopg2://{TEST_ENV['POSTGRES_USER']}:{TEST_ENV['POSTGRES_PASSWORD']}@"
         f"{TEST_ENV['POSTGRES_HOST']}:{TEST_ENV['POSTGRES_PORT']}/{TEST_ENV['POSTGRES_DB']}"
     )
     try:

@@ -47,7 +47,7 @@ import duckdb
 import pandas as pd
 
 from pipelines.common.metadata import get_connection, record_run
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
@@ -227,8 +227,8 @@ def build_all_facts(
     gold_storage: Optional[ObjectStorage] = None,
     meta_conn=None,
 ) -> Dict[str, int]:
-    silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
-    gold_storage = gold_storage or LocalFileStorage(DEFAULT_GOLD_STORAGE_PATH)
+    silver_storage = silver_storage or load_storage_from_env(DEFAULT_SILVER_STORAGE_PATH, "MINIO_SILVER_BUCKET")
+    gold_storage = gold_storage or load_storage_from_env(DEFAULT_GOLD_STORAGE_PATH, "MINIO_GOLD_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
 

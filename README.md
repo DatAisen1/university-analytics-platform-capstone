@@ -228,6 +228,15 @@ docker exec -it uap_postgres psql -U uap_admin -d university_analytics -c "\dn"
 
 Use this mode when you are debugging a particular stage or learning how each layer works.
 
+By default every command below reads/writes Bronze/Silver/Gold as local
+Parquet files under `warehouse/{bronze,silver,gold}_store/`, NOT MinIO --
+this is controlled by `STORAGE_BACKEND` in `.env` (default: `local`).
+To run the exact same commands against real MinIO instead, set
+`STORAGE_BACKEND=minio` in `.env` (with `docker compose up` running and
+buckets created via `python -m scripts.create_minio_buckets`) -- no
+other change is required, the same entrypoints below and the Dagster
+graph both honor it. See `.env.example` for details.
+
 Bronze
 
 python -m pipelines.ingestion.ingest_to_bronze

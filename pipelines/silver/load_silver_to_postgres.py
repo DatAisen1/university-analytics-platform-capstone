@@ -39,7 +39,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 
 from pipelines.common.postgres import replace_all_table_contents
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
@@ -100,7 +100,7 @@ def load_silver_to_postgres(
     finally:
         raw_conn.close()
 
-    silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
+    silver_storage = silver_storage or load_storage_from_env(DEFAULT_SILVER_STORAGE_PATH, "MINIO_SILVER_BUCKET")
     tables = tables or SILVER_TABLES
 
     loaded = []

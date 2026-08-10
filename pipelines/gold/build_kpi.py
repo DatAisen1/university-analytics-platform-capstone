@@ -26,11 +26,12 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from pipelines.common.config import ConfigError
 from pipelines.common.metadata import get_connection, record_run
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GOLD_STORAGE_PATH = _REPO_ROOT / "warehouse" / "gold_store"
@@ -168,14 +169,34 @@ def build_fact_institution_kpi(
         axis=1,
     ).reset_index()
 
-    kpi["eligible_count"] = kpi["eligible_count"].fillna(0)
-    kpi["graduation_count"] = kpi["graduation_count"].fillna(0)
-    kpi["dropout_count"] = kpi["dropout_count"].fillna(0)
-    kpi["shifter_count"] = kpi["shifter_count"].fillna(0)
-    kpi["retention_rate"] = kpi["retention_rate"].fillna(0.0)
-    kpi["momentum"] = kpi["momentum"].fillna(0.0)
+    # P3 fix: these six columns come out of pd.concat([...], axis=1) --
+    # a mix of groupby().size() (int64) and groupby().mean() (float64)
+    # results re-indexed against each other, so a college/period
+    # combination present in one Series but not another becomes NaN
+    # here. pd.to_numeric(..., errors="coerce") guarantees each column
+    # is a genuine numpy float64 BEFORE .fillna() runs -- closing off
+    # the actual root cause of the FutureWarning this used to raise:
+    # pandas warns when .fillna() is called on an *object-dtype* column
+    # (which happens whenever any of these columns picks up pandas'
+    # generic pd.NA sentinel, or an ambiguous dtype from concat, instead
+    # of a plain float NaN) because a future pandas release will stop
+    # silently downcasting the result back to a numeric dtype. Forcing
+    # numeric dtype here isn't a warnings-suppression band-aid -- it's
+    # removing the only path that could produce an object-dtype column
+    # in the first place, so there is nothing left to downcast.
+    kpi["eligible_count"] = pd.to_numeric(kpi["eligible_count"], errors="coerce").fillna(0)
+    kpi["graduation_count"] = pd.to_numeric(kpi["graduation_count"], errors="coerce").fillna(0)
+    kpi["dropout_count"] = pd.to_numeric(kpi["dropout_count"], errors="coerce").fillna(0)
+    kpi["shifter_count"] = pd.to_numeric(kpi["shifter_count"], errors="coerce").fillna(0)
+    kpi["retention_rate"] = pd.to_numeric(kpi["retention_rate"], errors="coerce").fillna(0.0)
+    kpi["momentum"] = pd.to_numeric(kpi["momentum"], errors="coerce").fillna(0.0)
 
-    kpi["graduation_rate"] = (kpi["graduation_count"] / kpi["eligible_count"].replace(0, pd.NA)).fillna(0.0).astype(float)
+    # Same root cause, same fix: pd.NA (pandas' generic nullable
+    # sentinel) forces whatever column it touches to object dtype the
+    # moment it's introduced via .replace(). np.nan is a native float64
+    # NaN -- swapping it in keeps this column numeric the entire way
+    # through the division and the .fillna(0.0) that follows.
+    kpi["graduation_rate"] = (kpi["graduation_count"] / kpi["eligible_count"].replace(0, np.nan)).fillna(0.0).astype(float)
     kpi["dropout_rate"] = kpi["dropout_count"] / kpi["enrollment_count"]
     kpi["shifter_stability"] = 1 - (kpi["shifter_count"] / kpi["enrollment_count"])
 
@@ -213,7 +234,7 @@ def build_kpi(
     meta_conn=None,
 ) -> Dict[str, object]:
     _validate_weights()
-    gold_storage = gold_storage or LocalFileStorage(DEFAULT_GOLD_STORAGE_PATH)
+    gold_storage = gold_storage or load_storage_from_env(DEFAULT_GOLD_STORAGE_PATH, "MINIO_GOLD_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
 

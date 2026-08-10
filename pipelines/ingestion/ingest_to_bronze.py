@@ -58,7 +58,7 @@ from pipelines.common.errors import InvalidSchemaError
 from pipelines.common.config import ReferenceData, load_default_reference_data
 from pipelines.common.metadata import get_connection, has_successful_run, record_run, record_success_once
 from pipelines.common.schemas import validate_bronze_dataframe
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_GENERATOR_OUTPUT = _REPO_ROOT / "data_generator" / "output"
@@ -277,7 +277,7 @@ def ingest_all(
     enrollment/graduation/dropout/shifter files into Bronze. Returns a
     list of per-(entity, partition_key) result summaries.
     """
-    storage = storage or LocalFileStorage(DEFAULT_BRONZE_STORAGE_PATH)
+    storage = storage or load_storage_from_env(DEFAULT_BRONZE_STORAGE_PATH, "MINIO_BRONZE_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
     reference = reference or load_default_reference_data()

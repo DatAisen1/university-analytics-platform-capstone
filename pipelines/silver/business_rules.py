@@ -56,7 +56,7 @@ import pandas as pd
 
 from pipelines.common.academic_periods import OBSERVED_START_YEAR, SEMESTER_LABELS
 from pipelines.common.metadata import get_connection, record_run
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
 # ADD near the top, after existing imports/constants
 from pipelines.common.errors import (
@@ -319,7 +319,7 @@ def run_business_validation(
     business_rules.parquet (matching validate_and_dedupe.py's existing
     quarantine-not-drop convention). Returns a per-entity summary.
     """
-    silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
+    silver_storage = silver_storage or load_storage_from_env(DEFAULT_SILVER_STORAGE_PATH, "MINIO_SILVER_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
 

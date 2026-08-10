@@ -29,7 +29,7 @@ from typing import List, Optional
 import duckdb
 
 from pipelines.common.metadata import get_connection
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 from pipelines.ingestion.ingest_to_bronze import (
     DEFAULT_BRONZE_STORAGE_PATH,
     STAGE,
@@ -68,7 +68,7 @@ def audit_bronze(
     per logged success, in log order, so the caller can filter for
     problems (`status != "OK"`) without re-deriving keys itself.
     """
-    storage = storage or LocalFileStorage(DEFAULT_BRONZE_STORAGE_PATH)
+    storage = storage or load_storage_from_env(DEFAULT_BRONZE_STORAGE_PATH, "MINIO_BRONZE_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
 

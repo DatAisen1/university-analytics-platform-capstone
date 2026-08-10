@@ -23,6 +23,17 @@ is written against ObjectStorage only. Swapping LocalFileStorage for
 S3Storage in production is a one-line change at the call site, not a
 rewrite of ingestion logic -- this is the entire point of depending on an
 interface instead of a concrete backend.
+
+Which backend a pipeline stage actually uses by default is decided in
+exactly one place: `load_storage_from_env` below, driven by the
+STORAGE_BACKEND setting (pipelines/common/settings.py::PipelineSettings).
+Every `storage or ...` default across pipelines/ingestion, pipelines/silver,
+and pipelines/gold calls this factory rather than hardcoding
+LocalFileStorage directly, so flipping STORAGE_BACKEND=minio in .env is
+enough to make every default entrypoint -- including Dagster's
+orchestration/assets.py, which never passes an explicit `storage=`
+argument -- write through S3Storage instead. See load_storage_from_env's
+own docstring for the P1 bug this fixes.
 """
 
 from __future__ import annotations
@@ -223,6 +234,47 @@ class S3Storage(ObjectStorage):
             last_modified=response["LastModified"],
             bucket=self.bucket,
         )
+
+
+def load_storage_from_env(
+    local_default: Path,
+    bucket_env_var: str,
+    env: Optional[dict] = None,
+) -> ObjectStorage:
+    """The single factory every pipeline stage's `storage or ...` default
+    should call (P1 fix). Reads PipelineSettings.STORAGE_BACKEND and
+    returns:
+
+      - STORAGE_BACKEND=local (the default -- unchanged from before this
+        fix): LocalFileStorage(local_default), exactly what every stage
+        hardcoded previously.
+      - STORAGE_BACKEND=minio: S3Storage via load_minio_storage_from_env,
+        i.e. real MinIO/S3, using `bucket_env_var` to pick the right
+        bucket (MINIO_BRONZE_BUCKET / MINIO_SILVER_BUCKET / MINIO_GOLD_BUCKET).
+
+    Why this exists: previously, `storage or LocalFileStorage(DEFAULT_X_PATH)`
+    was written at every call site (ingest_to_bronze.py, clean_entities.py,
+    build_dimensions.py, ...), which hardcoded the backend choice into the
+    *default*, not just the fallback. Nothing -- not Dagster's
+    orchestration/assets.py, not the documented "Run the Pipeline
+    Manually" README steps -- ever passed a `storage=` argument, so every
+    real pipeline run always used LocalFileStorage regardless of whether
+    MinIO was running, and the working S3Storage implementation was only
+    reachable through a second, separate script. Routing every call site
+    through this one factory means switching backends is a single
+    environment variable, not a second code path to keep in sync.
+
+    `env` is forwarded to settings the same way it is everywhere else in
+    this codebase -- pass an explicit mapping (as tests do) to bypass the
+    real process environment; leave it None to read `.env` / the real
+    environment (the production/Dagster/README call-site pattern).
+    """
+    from pipelines.common.settings import get_pipeline_settings
+
+    backend = get_pipeline_settings(env).require_valid_storage_backend()
+    if backend == "local":
+        return LocalFileStorage(local_default)
+    return load_minio_storage_from_env(bucket_env_var, env)
 
 
 def load_minio_storage_from_env(bucket_env_var: str, env: Optional[dict] = None) -> S3Storage:

@@ -29,7 +29,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 
 from pipelines.common.postgres import replace_all_table_contents
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GOLD_STORAGE_PATH = _REPO_ROOT / "warehouse" / "gold_store"
@@ -84,7 +84,7 @@ def load_gold_to_postgres(
     finally:
         raw_conn.close()
 
-    gold_storage = gold_storage or LocalFileStorage(DEFAULT_GOLD_STORAGE_PATH)
+    gold_storage = gold_storage or load_storage_from_env(DEFAULT_GOLD_STORAGE_PATH, "MINIO_GOLD_BUCKET")
     tables = tables or GOLD_TABLES
 
     loaded = [(name, _read_parquet(gold_storage, f"gold/{name}/data.parquet")) for name in tables]

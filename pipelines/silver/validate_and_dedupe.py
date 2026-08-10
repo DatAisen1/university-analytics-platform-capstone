@@ -46,7 +46,7 @@ import duckdb
 import pandas as pd
 
 from pipelines.common.metadata import get_connection, record_run
-from pipelines.common.storage import LocalFileStorage, ObjectStorage
+from pipelines.common.storage import ObjectStorage, load_storage_from_env
 from pipelines.silver.progression_validation import check_year_level_progression
 
 from pipelines.common.errors import DataQualityFailureError, DuplicateDataError
@@ -162,7 +162,7 @@ def process_enrollment(
     three business rules in sequence, writing the final valid Silver
     enrollment table and a combined quarantine table.
     """
-    silver_storage = silver_storage or LocalFileStorage(DEFAULT_SILVER_STORAGE_PATH)
+    silver_storage = silver_storage or load_storage_from_env(DEFAULT_SILVER_STORAGE_PATH, "MINIO_SILVER_BUCKET")
     owns_conn = meta_conn is None
     meta_conn = meta_conn or get_connection()
 
