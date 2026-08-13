@@ -1,0 +1,104 @@
+{
+  "dataset_schema_version": "1.0.0",
+  "generated_at": "2026-08-13T01:01:11.293234+00:00",
+  "seeds": {
+    "generate_students": 42,
+    "generate_admissions": 45,
+    "generate_progression": 43,
+    "apply_noise": 44
+  },
+  "config_hashes": {
+    "volumes.yaml": "d0e0a1f14d00f8ad9f98902f167eb1ee2c7bcc7ccbea4ceba6a9a8cff0c28c91",
+    "admissions_rules.yaml": "8ec5241a1b556ef5f6fa3509caddbd9a60d31ba5c49f007e3d0dd55b5bddd65e",
+    "progression_rules.yaml": "7e0e8d5f7dd40017a2a98c343eb860cb6673f36545168a08e30509dde4da17cf",
+    "noise_rules.yaml": "a6170c2ac996425c6c92f24829bddb284623d89c62340fd7d1ba3ea1f5f543c1"
+  },
+  "reference_data": {
+    "college_count": 8,
+    "program_count": 37
+  },
+  "row_counts": {
+    "students_by_cohort": {
+      "2021": 1800,
+      "2022": 1900,
+      "2023": 2000
+    },
+    "admissions_rows_by_year": {
+      "2021-2022": 37,
+      "2022-2023": 37,
+      "2023-2024": 37
+    },
+    "progression": {
+      "total_students": 5700,
+      "total_enrollment_records": 20109,
+      "total_graduation_events": 309,
+      "total_dropout_events": 870,
+      "total_shifter_events": 242,
+      "outcome_by_cohort": {
+        "2021": {
+          "ACTIVE": 1302,
+          "GRADUATED": 139,
+          "DROPPED": 359
+        },
+        "2022": {
+          "ACTIVE": 1455,
+          "GRADUATED": 130,
+          "DROPPED": 315
+        },
+        "2023": {
+          "ACTIVE": 1764,
+          "GRADUATED": 40,
+          "DROPPED": 196
+        }
+      },
+      "cohort_totals_reconciled": true
+    },
+    "noise": {
+      "typos_introduced": 112,
+      "total_rows_processed": 20109,
+      "status_noised": 8805,
+      "duplicated": 165,
+      "late_corrected": 482
+    }
+  },
+  "validation": {
+    "ran": true,
+    "passed": true,
+    "report": {
+      "academic_years": {
+        "2021-2022": true,
+        "2022-2023": true,
+        "2023-2024": true
+      },
+      "semesters": {
+        "1st Semester": true,
+        "2nd Semester": true
+      },
+      "year_levels": {
+        "Freshman": true,
+        "Sophomore": true,
+        "Junior": true,
+        "Senior": true,
+        "Super Senior": true
+      },
+      "duplicate_records": 0,
+      "invalid_records": {
+        "orphan_student_references": {
+          "enrollment": 0,
+          "graduation": 0,
+          "dropout": 0,
+          "shifter": 0
+        },
+        "schema_violations": {
+          "enrollment": 0,
+          "graduation": 0,
+          "dropout": 0,
+          "shifter": 0,
+          "student": 0
+        },
+        "impossible_year_level_transitions": 0,
+        "total": 0
+      }
+    }
+  }
+}

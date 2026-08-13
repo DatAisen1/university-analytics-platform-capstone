@@ -101,6 +101,45 @@ def seeded_fixture(engine):
     count (999) is a sentinel that must NEVER leak into period 1-3's
     features."""
     with engine.begin() as conn:
+        # `clean_database` (the module-scoped fixture that creates this
+        # isolated database) only runs once per module, but this fixture
+        # runs once per TEST -- so without an explicit reset here, the
+        # second test in this module inserts into tables the first test
+        # already committed rows into (fixed primary keys like
+        # gender_key=1, college_key=1, ...), which fails on a duplicate
+        # key rather than the FK violation this fixture used to mask.
+        # Plain DELETE, not TRUNCATE ... CASCADE: CASCADE also truncates any
+        # OTHER table with an FK pointing at these (e.g. gold.model_registry
+        # references dim_program/dim_college), and pipeline_writer isn't the
+        # owner of that table's identity sequence, so RESTART IDENTITY on it
+        # fails with InsufficientPrivilege. DELETE only ever touches the
+        # rows in the tables listed here -- no cascade, no sequence access
+        # needed -- and since every row below uses an explicit fixed key
+        # (never relying on auto-increment), there's nothing to reset.
+        for stmt in [
+            "DELETE FROM gold.fact_enrollment",
+            "DELETE FROM gold.dim_student",
+            "DELETE FROM gold.dim_academic_period",
+            "DELETE FROM gold.dim_program",
+            "DELETE FROM gold.dim_college",
+            "DELETE FROM gold.dim_gender",
+            "DELETE FROM gold.dim_year_level",
+        ]:
+            conn.execute(text(stmt))
+        # dim_student.gender_key and fact_enrollment.year_level_key are both
+        # NOT NULL FKs (see warehouse/ddl/003_gold_star_schema.sql) into these
+        # two governed dimensions. Production always populates them via
+        # build_dimensions.py's build_dim_gender()/build_dim_year_level()
+        # before dim_student/fact_enrollment ever exist -- this fixture must
+        # do the same or the inserts below violate those FKs.
+        conn.execute(text("""
+            INSERT INTO gold.dim_gender (gender_key, gender_code, gender_label)
+            VALUES (1, 'F', 'Female')
+        """))
+        conn.execute(text("""
+            INSERT INTO gold.dim_year_level (year_level_key, year_level, year_level_label)
+            VALUES (1, 1, 'First Year')
+        """))
         conn.execute(text("""
             INSERT INTO gold.dim_college (college_key, college_id, college_name)
             VALUES (1, 'COE', 'College of Engineering')

@@ -126,6 +126,38 @@ def build_fact_enrollment(
     df["college_key"] = df["college_id"].map(college_key_by_id)
     df["year_level_key"] = df["year_level"].map(year_level_key_by_level)
 
+    # P1 fix (build_kpi.py undercount bug): year_level_key already had this
+    # guard; program_key, college_key, and academic_period_key did not.
+    # A row with any of these unmapped (a program_id/college_id not in the
+    # dimension, or an (academic_year, semester_number) not in
+    # dim_academic_period) got a silent NaN here. That row still passed
+    # through to fact_enrollment -- but pandas' groupby(...).size() in
+    # build_kpi.py drops NaN-keyed rows by default (dropna=True), so the
+    # row silently vanished from fact_institution_kpi.enrollment_count
+    # while still existing in fact_enrollment itself. That's exactly the
+    # shape of bug that produced mart_executive_summary's enrollment total
+    # (sum of the KPI's per-group counts) undercounting gold.fact_enrollment's
+    # actual row count. Same fix as year_level_key: fail loudly, don't
+    # silently drop rows out of downstream aggregates.
+    unmapped_program = df["program_key"].isna().sum()
+    if unmapped_program:
+        raise ValueError(
+            f"{unmapped_program} fact_enrollment row(s) have a program_id not present in "
+            "dim_program -- fix the source data or dim_program's build, don't silently drop them."
+        )
+    unmapped_college = df["college_key"].isna().sum()
+    if unmapped_college:
+        raise ValueError(
+            f"{unmapped_college} fact_enrollment row(s) have a college_id not present in "
+            "dim_college -- fix the source data or dim_college's build, don't silently drop them."
+        )
+    unmapped_period = df["academic_period_key"].isna().sum()
+    if unmapped_period:
+        raise ValueError(
+            f"{unmapped_period} fact_enrollment row(s) have an (academic_year, semester_number) not "
+            "present in dim_academic_period -- fix the source data or dim_academic_period's build, "
+            "don't silently drop them."
+        )
     unmapped = df["year_level_key"].isna().sum()
     if unmapped:
         raise ValueError(
