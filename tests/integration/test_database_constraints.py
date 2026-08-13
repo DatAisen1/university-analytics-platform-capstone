@@ -14,11 +14,16 @@ variables. Skipped automatically if unavailable.
 """
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 from pipelines.common.migrations import apply_migrations
 from pipelines.common.postgres import bootstrap_warehouse, get_admin_connection
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _pg_test_db import create_isolated_database, drop_database_if_exists  # noqa: E402
 
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
@@ -34,6 +39,21 @@ ROLE_PASSWORDS = {
     "dashboard_reader": "pw_dash123",
     "analyst_readonly": "pw_analyst123",
 }
+
+# P1 fix (architecture, not a typo): this module previously bootstrapped
+# straight into TEST_ENV["POSTGRES_DB"] -- the SAME database name
+# test_dbt_marts.py / test_train_prophet.py rely on already containing
+# real, populated pipeline output. bootstrap_warehouse() applying
+# migrations against a database that's supposed to hold real data (or
+# another destructive test module's fresh, empty rebuild) is exactly the
+# collision that produced cascading "alembic_version says head but
+# schemas are missing" errors across the whole suite. Constraint-existence
+# checks only need a genuinely fresh, correctly migrated database -- they
+# have no need to touch anything real -- so this module gets its own
+# throwaway database via tests/_pg_test_db.py, same pattern as
+# test_warehouse_rebuild_from_clean.py.
+_ISOLATED_DB_BASE = f"{TEST_ENV['POSTGRES_DB']}_constraints_test"
+ISOLATED_ENV: dict = {}
 
 
 def _postgres_available() -> bool:
@@ -53,9 +73,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module", autouse=True)
 def migrated_warehouse():
     """Bootstrap roles/schemas/grants, then run every migration -- the
-    exact sequence a clean-database deploy would follow."""
-    bootstrap_warehouse(ROLE_PASSWORDS, env=TEST_ENV)
+    exact sequence a clean-database deploy would follow -- against this
+    module's own private database (see _ISOLATED_DB_BASE above)."""
+    global ISOLATED_ENV
+    db_name = create_isolated_database(_ISOLATED_DB_BASE, TEST_ENV)
+    ISOLATED_ENV = {**TEST_ENV, "POSTGRES_DB": db_name}
+    bootstrap_warehouse(ROLE_PASSWORDS, env=ISOLATED_ENV)
     yield
+    drop_database_if_exists(db_name, TEST_ENV)
 
 
 def _constraint_exists(cur, schema: str, table: str, constraint_name: str) -> bool:
@@ -122,7 +147,7 @@ def test_migrations_are_all_applied():
 
     from pipelines.common.migrations import _alembic_config
 
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         cur.execute("SELECT version_num FROM alembic_version")
         current_head = cur.fetchone()[0]
@@ -140,7 +165,7 @@ def test_migrations_are_all_applied():
 def test_apply_migrations_twice_is_a_noop():
     """Task 26/27: re-running migrations against an already-migrated
     database must not error and must not re-apply anything."""
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     newly_applied = apply_migrations(conn)
     conn.close()
     assert newly_applied == []
@@ -151,14 +176,14 @@ def test_apply_migrations_twice_is_a_noop():
 # ---------------------------------------------------------------------------
 
 def test_gold_dim_program_has_natural_key_unique_constraint():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         assert _constraint_exists(cur, "gold", "dim_program", "uq_gold_dim_program_program_id")
     conn.close()
 
 
 def test_gold_dim_program_has_college_foreign_key():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -173,7 +198,7 @@ def test_gold_dim_program_has_college_foreign_key():
 
 
 def test_gold_dim_student_not_null_columns():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         for column in ("student_id", "gender_key", "college_key", "program_key", "_is_current"):
             assert _column_not_null(cur, "gold", "dim_student", column), f"dim_student.{column} should be NOT NULL"
@@ -181,7 +206,7 @@ def test_gold_dim_student_not_null_columns():
 
 
 def test_gold_dim_student_one_current_row_index():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         assert _index_exists(cur, "gold", "ux_dim_student_one_current")
     conn.close()
@@ -196,7 +221,7 @@ def test_gold_dim_student_one_current_row_index():
 ])
 def test_gold_fact_tables_have_grain_enforcing_unique_constraint(fact_table, constraint_name):
     """Previously these fact tables had NO PK/UNIQUE at all (Task 26)."""
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         assert _constraint_exists(cur, "gold", fact_table, constraint_name)
     conn.close()
@@ -207,7 +232,7 @@ def test_gold_fact_tables_have_grain_enforcing_unique_constraint(fact_table, con
 # ---------------------------------------------------------------------------
 
 def test_silver_program_table_exists_with_unique_constraint():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_schema = 'silver' AND table_name = 'program'"
@@ -218,14 +243,14 @@ def test_silver_program_table_exists_with_unique_constraint():
 
 
 def test_silver_enrollment_has_student_period_unique_constraint():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         assert _constraint_exists(cur, "silver", "enrollment", "uq_silver_enrollment_student_period")
     conn.close()
 
 
 def test_silver_tables_have_not_null_natural_keys():
-    conn = get_admin_connection(TEST_ENV)
+    conn = get_admin_connection(ISOLATED_ENV)
     with conn.cursor() as cur:
         assert _column_not_null(cur, "silver", "student", "student_id")
         assert _column_not_null(cur, "silver", "program", "program_id")

@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import io
 import os
-import uuid
+import sys
+from pathlib import Path
 from typing import Dict
 
 import pandas as pd
-import psycopg2
 import pytest
 from sqlalchemy import create_engine, text
 
@@ -34,6 +34,9 @@ from pipelines.common.postgres import bootstrap_warehouse, get_admin_connection
 from pipelines.common.storage import ObjectStorage
 from pipelines.gold.load_gold_to_postgres import GOLD_TABLES, load_gold_to_postgres
 from pipelines.silver.load_silver_to_postgres import SILVER_TABLES, load_silver_to_postgres
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _pg_test_db import create_isolated_database, drop_database_if_exists  # noqa: E402
 
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
@@ -53,22 +56,20 @@ ROLE_PASSWORDS = {
 # P1 fix (test isolation): this module's whole point is to DROP and
 # recreate the warehouse's schemas -- that is destructive by design, and
 # destructive-by-design must never share a database with any other test
-# module. Previously this fixture ran its drop/rebuild against
-# TEST_ENV["POSTGRES_DB"] directly -- the SAME database every other
-# integration test module (e.g. test_database_constraints.py) also
-# bootstraps against in the same pytest session. Whichever module ran
-# after this one inherited a mid-drop or freshly-stubbed database it
-# never asked for. The fix is not "run this file alone" or "reorder
-# tests" (both are band-aids that break the next time someone adds a
-# test file) -- it's giving this module a database of its own, created
-# and destroyed entirely within this module's fixture, so nothing it
-# does can ever leak into another module's state.
-_REBUILD_DB_NAME = f"{TEST_ENV['POSTGRES_DB']}_rebuild_test_{uuid.uuid4().hex[:8]}"
+# module. This module gets its own throwaway database, created and
+# destroyed entirely within this module's fixture (see tests/_pg_test_db.py
+# for why -- and for the second, previously-unfixed bug this now also
+# resolves: a genuinely broken "DROP DATABASE cannot run inside a
+# transaction block" error, caused by running two DDL statements
+# back-to-back on one connection. Each statement now runs on its own
+# fresh, single-purpose connection instead.)
+_REBUILD_DB_BASE = f"{TEST_ENV['POSTGRES_DB']}_rebuild_test"
 
 # The env every test/fixture in this module actually talks to -- same
 # cluster/credentials as TEST_ENV, but pointed at this module's own
-# throwaway database instead of the shared one.
-REBUILD_ENV = {**TEST_ENV, "POSTGRES_DB": _REBUILD_DB_NAME}
+# throwaway database instead of the shared one. Populated by the
+# clean_database fixture below once it creates the actual database.
+REBUILD_ENV: Dict[str, str] = {}
 
 
 def _postgres_available() -> bool:
@@ -84,37 +85,6 @@ pytestmark = pytest.mark.skipif(
     not _postgres_available(),
     reason="No reachable Postgres instance for these tests -- see module docstring",
 )
-
-
-def _maintenance_connection():
-    """A connection to Postgres's own `postgres` maintenance database --
-    NOT to `_REBUILD_DB_NAME` or TEST_ENV["POSTGRES_DB"] -- because
-    CREATE DATABASE / DROP DATABASE cannot run against the database you
-    are currently connected to. Autocommit is required: both statements
-    are disallowed inside a transaction block."""
-    conn = psycopg2.connect(
-        host=TEST_ENV["POSTGRES_HOST"], port=TEST_ENV["POSTGRES_PORT"], dbname="postgres",
-        user=TEST_ENV["POSTGRES_USER"], password=TEST_ENV["POSTGRES_PASSWORD"],
-    )
-    conn.autocommit = True
-    return conn
-
-
-def _drop_rebuild_database_if_exists() -> None:
-    """Terminate any lingering connections to `_REBUILD_DB_NAME` (a
-    previous interrupted run, e.g. a killed test process, can leave one
-    open -- DROP DATABASE refuses to run while any session is attached)
-    then drop it. Safe to call whether or not the database exists."""
-    with _maintenance_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                WHERE datname = %s AND pid <> pg_backend_pid()
-                """,
-                (_REBUILD_DB_NAME,),
-            )
-            cur.execute(f'DROP DATABASE IF EXISTS "{_REBUILD_DB_NAME}"')
 
 
 class _InMemoryStorage(ObjectStorage):
@@ -160,28 +130,17 @@ def clean_database():
     dropped -- not `public` -- would keep its alembic_version row,
     Alembic would see "already at head" and silently decline to recreate
     anything, and every table this module's tests expect would simply be
-    gone with no error (see
-    pipelines.common.migrations.apply_migrations's
-    _expected_schemas_missing guard, which exists specifically to catch
-    this). Creating a genuinely fresh database via CREATE DATABASE makes
-    that whole failure mode structurally impossible here: there is no
-    pre-existing `public.alembic_version` row to survive anything,
-    because there is no pre-existing database at all.
+    gone with no error. Creating a genuinely fresh database via CREATE
+    DATABASE makes that whole failure mode structurally impossible here.
 
-    Test-isolation fix (this fixture's main change): previously this
-    dropped and rebuilt schemas inside TEST_ENV["POSTGRES_DB"] -- the
-    same database every other integration test module shares in a
-    single pytest run. That let this module's schema drops leak into
-    whichever module pytest happened to run next. Operating on
-    `_REBUILD_DB_NAME`, a database that exists only for the lifetime of
-    this fixture, removes the shared-state dependency entirely: nothing
-    this module does can affect any other module, and nothing any other
-    module does can affect this one.
+    Test-isolation fix (kept): operating on a throwaway database instead
+    of the shared TEST_ENV["POSTGRES_DB"] means nothing this module does
+    can affect any other module, and nothing any other module does can
+    affect this one.
     """
-    _drop_rebuild_database_if_exists()
-    with _maintenance_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(f'CREATE DATABASE "{_REBUILD_DB_NAME}"')
+    global REBUILD_ENV
+    db_name = create_isolated_database(_REBUILD_DB_BASE, TEST_ENV)
+    REBUILD_ENV = {**TEST_ENV, "POSTGRES_DB": db_name}
 
     # bootstrap_roles (inside bootstrap_warehouse) creates the four
     # service roles at the CLUSTER level, not per-database -- Postgres
@@ -190,7 +149,7 @@ def clean_database():
     bootstrap_warehouse(ROLE_PASSWORDS, env=REBUILD_ENV)
     yield
 
-    _drop_rebuild_database_if_exists()
+    drop_database_if_exists(db_name, TEST_ENV)
 
 
 @pytest.fixture
@@ -345,4 +304,4 @@ class TestFkConnectedReloadIdempotency:
         with engine.connect() as conn:
             for table_name in tables:
                 row_count = conn.execute(text(f"SELECT COUNT(*) FROM gold.{table_name}")).scalar()
-                assert row_count == 1, f"gold.{table_name} should have exactly 1 row after two identical loads" 
+                assert row_count == 1, f"gold.{table_name} should have exactly 1 row after two identical loads"

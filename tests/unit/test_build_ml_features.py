@@ -21,6 +21,8 @@ pattern in tests/integration/test_database_constraints.py.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -31,6 +33,9 @@ from pipelines.gold.build_ml_features import (
     build_program_forecast_features,
     feature_dataset_fingerprint,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _pg_test_db import create_isolated_database, drop_database_if_exists  # noqa: E402
 
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
@@ -45,6 +50,18 @@ ROLE_PASSWORDS = {
     "dashboard_reader": "pw_dash123",
     "analyst_readonly": "pw_analyst123",
 }
+
+# P1 fix (architecture, not a typo): this fixture used to run
+# `DROP SCHEMA ... CASCADE` directly against TEST_ENV["POSTGRES_DB"] --
+# the same database name test_dbt_marts.py / test_train_prophet.py
+# expect to already hold real, populated pipeline output. Dropping the
+# whole schema there is the single most destructive possible action one
+# test module could take against another module's required state. This
+# module gets its own throwaway database instead (see
+# tests/_pg_test_db.py), so its DROP SCHEMA can never touch anything but
+# a database this module alone created and will delete when it's done.
+_ISOLATED_DB_BASE = f"{TEST_ENV['POSTGRES_DB']}_ml_features_test"
+ISOLATED_ENV: dict = {}
 
 
 def _postgres_available() -> bool:
@@ -62,19 +79,17 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module", autouse=True)
 def clean_database():
-    admin_conn = get_admin_connection(TEST_ENV)
-    with admin_conn.cursor() as cur:
-        for schema in ("bronze", "silver", "gold", "marts", "meta"):
-            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-    admin_conn.commit()
-    admin_conn.close()
-    bootstrap_warehouse(ROLE_PASSWORDS, env=TEST_ENV)
+    global ISOLATED_ENV
+    db_name = create_isolated_database(_ISOLATED_DB_BASE, TEST_ENV)
+    ISOLATED_ENV = {**TEST_ENV, "POSTGRES_DB": db_name}
+    bootstrap_warehouse(ROLE_PASSWORDS, env=ISOLATED_ENV)
     yield
+    drop_database_if_exists(db_name, TEST_ENV)
 
 
 @pytest.fixture
 def engine():
-    host, port, db = TEST_ENV["POSTGRES_HOST"], TEST_ENV["POSTGRES_PORT"], TEST_ENV["POSTGRES_DB"]
+    host, port, db = ISOLATED_ENV["POSTGRES_HOST"], ISOLATED_ENV["POSTGRES_PORT"], ISOLATED_ENV["POSTGRES_DB"]
     return create_engine(
         f"postgresql+psycopg2://pipeline_writer:{ROLE_PASSWORDS['pipeline_writer']}@{host}:{port}/{db}"
     )

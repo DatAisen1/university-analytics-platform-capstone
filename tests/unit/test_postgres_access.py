@@ -18,11 +18,16 @@ doesn't become dependent on a database being up.
 """
 
 import os
+import sys
+from pathlib import Path
 
 import psycopg2
 import pytest
 
 from pipelines.common.postgres import bootstrap_warehouse, get_admin_connection, get_role_connection
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _pg_test_db import create_isolated_database, drop_database_if_exists  # noqa: E402
 
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
@@ -38,6 +43,17 @@ ROLE_PASSWORDS = {
     "dashboard_reader": "pw_dash123",
     "analyst_readonly": "pw_analyst123",
 }
+
+# P1 fix (architecture, not a typo): this fixture writes throwaway
+# `test_table` rows directly into bronze/silver/gold/marts on whatever
+# database TEST_ENV["POSTGRES_DB"] points at -- if that's the same
+# database test_dbt_marts.py / test_train_prophet.py expect to already
+# hold real pipeline output, RBAC probing here pollutes it with junk
+# tables (or collides with another destructive module's fresh, empty
+# rebuild). This module gets its own throwaway database instead (see
+# tests/_pg_test_db.py).
+_ISOLATED_DB_BASE = f"{TEST_ENV['POSTGRES_DB']}_access_test"
+ISOLATED_ENV: dict = {}
 
 
 def _postgres_available() -> bool:
@@ -58,10 +74,14 @@ pytestmark = pytest.mark.skipif(
 def bootstrapped_warehouse():
     """Ensure the warehouse (roles, schemas, grants) exists before any
     test in this module runs, and create one throwaway table per layer
-    so read/write tests have something real to hit."""
-    bootstrap_warehouse(ROLE_PASSWORDS, env=TEST_ENV)
+    so read/write tests have something real to hit -- all inside this
+    module's own private database."""
+    global ISOLATED_ENV
+    db_name = create_isolated_database(_ISOLATED_DB_BASE, TEST_ENV)
+    ISOLATED_ENV = {**TEST_ENV, "POSTGRES_DB": db_name}
+    bootstrap_warehouse(ROLE_PASSWORDS, env=ISOLATED_ENV)
 
-    admin_conn = get_admin_connection(TEST_ENV)
+    admin_conn = get_admin_connection(ISOLATED_ENV)
     admin_conn.autocommit = True
     with admin_conn.cursor() as cur:
         for schema in ("bronze", "silver", "gold", "marts"):
@@ -72,16 +92,18 @@ def bootstrapped_warehouse():
 
     yield
 
-    admin_conn = get_admin_connection(TEST_ENV)
+    admin_conn = get_admin_connection(ISOLATED_ENV)
     admin_conn.autocommit = True
     with admin_conn.cursor() as cur:
         for schema in ("bronze", "silver", "gold", "marts"):
             cur.execute(f"DROP TABLE IF EXISTS {schema}.test_table")
     admin_conn.close()
 
+    drop_database_if_exists(db_name, TEST_ENV)
+
 
 def _role_conn(role: str):
-    return get_role_connection(role, ROLE_PASSWORDS[role], env=TEST_ENV)
+    return get_role_connection(role, ROLE_PASSWORDS[role], env=ISOLATED_ENV)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +283,7 @@ def test_dashboard_reader_can_read_a_table_created_after_grants_were_set(bootstr
     reader_conn.close()
 
     # cleanup
-    admin_conn = get_admin_connection(TEST_ENV)
+    admin_conn = get_admin_connection(ISOLATED_ENV)
     admin_conn.autocommit = True
     with admin_conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS gold.future_table")
