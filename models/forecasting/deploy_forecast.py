@@ -237,7 +237,7 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                 # evaluation-only candidate still needs an artifact on disk
                 # so its walk-forward result is reproducible/inspectable
                 # later, even if it's never deployed.
-                train_df = college_series.rename(columns={metric: "y_col"})
+                train_df = college_series.rename(columns={metric: "y"})
                 model = fit_prophet(train_df)
                 artifact_path = artifacts_dir / f"{model_version}.pkl"
                 with artifact_path.open("wb") as f:

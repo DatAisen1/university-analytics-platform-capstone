@@ -1,22 +1,22 @@
 # Forecast Model Evaluation Report
 
-Prophet beats the best baseline on **8 of 16** series (50%).
+Prophet beats the best baseline on **9 of 16** series (56%).
 
 | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Prophet R² | Beats Baseline? |
 |---|---|---|---|---|---|---|
-| CICT | enrollment_count | 24.99 | 222.00 | 569.12 | 0.980 | ✅ |
-| CICT | graduation_count | 24.75 | 24.75 | 24.75 | -0.333 | ⚠️ NO |
-| CMBT | enrollment_count | 46.95 | 259.75 | 673.70 | 0.892 | ✅ |
-| CMBT | graduation_count | 28.30 | 28.50 | 28.04 | -0.323 | ⚠️ NO |
-| COA | enrollment_count | 23.45 | 50.75 | 62.68 | 0.071 | ✅ |
-| COA | graduation_count | 8.05 | 6.75 | 11.58 | -0.537 | ⚠️ NO |
-| COC | enrollment_count | 26.44 | 86.00 | 215.95 | 0.745 | ✅ |
-| COC | graduation_count | 7.56 | 7.50 | 7.37 | -0.305 | ⚠️ NO |
-| COE | enrollment_count | 29.63 | 103.50 | 258.64 | 0.797 | ✅ |
-| COE | graduation_count | 0.84 | 0.25 | 0.38 | 0.000 | ⚠️ NO |
-| COED | enrollment_count | 40.95 | 198.00 | 449.72 | 0.863 | ✅ |
-| COED | graduation_count | 25.00 | 21.50 | 26.23 | -0.082 | ⚠️ NO |
-| CPADM | enrollment_count | 12.67 | 71.25 | 179.12 | 0.943 | ✅ |
-| CPADM | graduation_count | 5.69 | 5.25 | 5.37 | -0.357 | ⚠️ NO |
-| IPE | enrollment_count | 28.20 | 52.00 | 38.36 | -1.006 | ✅ |
-| IPE | graduation_count | 7.36 | 5.50 | 20.03 | -1.156 | ⚠️ NO |
+| CICT | enrollment_count | 114.37 | 145.00 | 350.53 | 0.265 | ✅ |
+| CICT | graduation_count | 0.35 | 0.67 | 0.40 | -0.502 | ✅ |
+| CMBT | enrollment_count | 146.32 | 187.33 | 478.81 | 0.317 | ✅ |
+| CMBT | graduation_count | 0.33 | 0.33 | 0.33 | -0.500 | ⚠️ NO |
+| COA | enrollment_count | 32.70 | 47.00 | 84.21 | -0.038 | ✅ |
+| COA | graduation_count | 9.48 | 1.00 | 7.83 | -411.709 | ⚠️ NO |
+| COC | enrollment_count | 48.73 | 64.33 | 151.51 | 0.255 | ✅ |
+| COC | graduation_count | 0.00 | 0.00 | 0.00 | 1.000 | ⚠️ NO |
+| COE | enrollment_count | 58.26 | 75.33 | 187.14 | 0.271 | ✅ |
+| COE | graduation_count | 1.19 | 0.33 | 0.52 | -7.121 | ⚠️ NO |
+| COED | enrollment_count | 101.74 | 131.33 | 319.77 | 0.271 | ✅ |
+| COED | graduation_count | 10.61 | 8.00 | 7.24 | -13.127 | ⚠️ NO |
+| CPADM | enrollment_count | 38.35 | 49.33 | 125.07 | 0.286 | ✅ |
+| CPADM | graduation_count | 0.00 | 0.00 | 0.00 | 1.000 | ⚠️ NO |
+| IPE | enrollment_count | 30.50 | 47.00 | 24.84 | -1.109 | ⚠️ NO |
+| IPE | graduation_count | 10.06 | 10.33 | 16.81 | -3.133 | ✅ |

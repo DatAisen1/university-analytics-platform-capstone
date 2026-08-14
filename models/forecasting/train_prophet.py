@@ -135,7 +135,7 @@ def walk_forward_evaluate(
         actual = float(test_row[metric].iloc[0])
         test_ds = test_row["ds"].iloc[0]
 
-        train_prophet_df = train.rename(columns={metric: "y_col"})
+        train_prophet_df = train.rename(columns={metric: "y"})
         model = fit_prophet(train_prophet_df)
         prophet_pred = predict_point(model, test_ds)
 
@@ -215,7 +215,7 @@ def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> L
     for college_id in sorted(df["college_id"].unique()):
         college_series = df[df["college_id"] == college_id].sort_values("period_ordinal")
         for metric in TARGET_METRICS:
-            train_df = college_series.rename(columns={metric: "y_col"})
+            train_df = college_series.rename(columns={metric: "y"})
             model = fit_prophet(train_df)
             path = artifacts_dir / f"{college_id}_{metric}_prophet.pkl"
             with path.open("wb") as f:
@@ -252,7 +252,7 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
             f"{row['naive_mae']:.2f} | {row['historical_avg_mae']:.2f} | "
             f"{row['prophet_r2']:.3f} | {flag} |"
         )
-    md_path.write_text("\n".join(lines) + "\n")
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     return csv_path, md_path
 

@@ -169,6 +169,24 @@ def apply_migrations(conn, ddl_dir: Path = DDL_DIR, dry_run: bool = False) -> Li
         except Exception as exc:
             raise MigrationError(f"Alembic upgrade failed: {exc}") from exc
 
+        # Bug found running migration 0012 for the first time through this
+        # function: SQLAlchemy 2.0-style Connection objects require an
+        # EXPLICIT commit -- unlike the old implicit-autocommit-on-close
+        # behavior, `with engine.connect() as connection:` silently rolls
+        # back any uncommitted transaction the moment this block exits.
+        # Alembic's own command.upgrade() logs "Running upgrade..." and
+        # this function happily returned the newly-applied revision list,
+        # making it LOOK like the migration succeeded -- but without this
+        # commit, every change (including the write to alembic_version
+        # itself) was discarded on connection close. Confirmed against a
+        # live Postgres 16 instance: 0012 printed as applied, then
+        # `SELECT version_num FROM public.alembic_version` still showed
+        # the previous revision. Migrations 0001-0011 are unaffected only
+        # because they were applied through a different, correctly-
+        # committing path at some earlier point -- this function itself
+        # has never durably committed anything until now.
+        connection.commit()
+
         after = set(context.get_current_heads())
         newly_applied = [
             r.revision for r in script.walk_revisions()

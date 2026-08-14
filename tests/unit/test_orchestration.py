@@ -7,14 +7,18 @@ Tests for orchestration/ (Days 18-19). Split into two tiers:
     Definitions object loads, and the asset dependency graph matches
     docs/02_System_Architecture.md's orchestration diagram exactly.
   - Full materialization test (skipped if Postgres/dbt unreachable): an
-    actual subprocess-level `dagster asset materialize --select "*"` run,
-    proving the entire pipeline executes end-to-end THROUGH Dagster's own
-    execution engine.
+    actual subprocess-level `dagster asset materialize --select <all ten
+    assets, named explicitly>` run, proving the entire pipeline executes
+    end-to-end THROUGH Dagster's own execution engine. The ten assets are
+    named explicitly rather than selected via `--select "*"` -- see the
+    comment at the subprocess.run call for why the wildcard form is
+    avoided.
 """
 
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -139,9 +143,25 @@ def _dbt_available() -> bool:
     return shutil.which("dbt") is not None
 
 
+def _generated_dataset_available() -> bool:
+    """The bronze asset's semester-scoped entities (student, enrollment,
+    dropout, graduation, shifter) source from data_generator/output/,
+    which `python -m data_generator.generators.generate_all` must be run
+    to produce -- it is not checked into the repo and nothing else in
+    this test module builds it. Without it, bronze silently no-ops on
+    those entities (NO_SOURCE_FILE, not a failure), silver never writes
+    their Parquet files, and validation dies several layers downstream
+    with a FileNotFoundError that looks like a CLI/config bug but isn't
+    one. Skip with a clear reason instead of failing confusingly."""
+    return (_REPO_ROOT / "data_generator" / "output" / "student_master.csv").exists()
+
+
 @pytest.mark.skipif(
-    not (_postgres_available() and _dbt_available()),
-    reason="Requires both a reachable Postgres instance and the dbt CLI",
+    not (_postgres_available() and _dbt_available() and _generated_dataset_available()),
+    reason=(
+        "Requires a reachable Postgres instance, the dbt CLI, and a generated "
+        "dataset -- run `python -m data_generator.generators.generate_all` first"
+    ),
 )
 def test_full_pipeline_materializes_successfully_via_dagster():
     """Day 18's core validation checklist item: trigger a real run and
@@ -156,8 +176,25 @@ def test_full_pipeline_materializes_successfully_via_dagster():
         "POSTGRES_DB": TEST_ENV["POSTGRES_DB"],
     })
 
+    # `--select "*"` is avoided deliberately. On at least one Windows/
+    # dagster-1.13.14 combination this wildcard gets expanded into the
+    # repo's own directory listing before Click's option parser ever
+    # sees it (reproduced identically via a compiled `dagster.exe`
+    # shim, `python -m dagster`, and pytest's own subprocess.run -- so
+    # it is not a shell-quoting issue, and not fixed by changing how
+    # the caller is invoked). Rather than depend on wildcard-selection
+    # behavior that isn't reliable across platforms/versions, select
+    # the ten pipeline assets explicitly -- the same fixed list
+    # test_full_pipeline_job_selects_all_ten_assets already asserts
+    # against, so this stays in sync with that test by construction.
+    # This is also arguably the more correct test regardless of the
+    # Windows quirk: it proves this exact graph materializes, not
+    # "whatever `*` happens to resolve to."
+    asset_selection = (
+        "bronze,silver,validation,gold,warehouse,dbt,features,training,evaluation,forecast"
+    )
     result = subprocess.run(
-        ["dagster", "asset", "materialize", "--select", "*", "-f", "orchestration/definitions.py"],
+        [sys.executable, "-m", "dagster", "asset", "materialize", "--select", asset_selection, "-f", "orchestration/definitions.py"],
         capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
     )
     assert result.returncode == 0, result.stdout + result.stderr
