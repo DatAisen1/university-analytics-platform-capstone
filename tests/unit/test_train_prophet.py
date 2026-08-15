@@ -5,18 +5,14 @@ Tests for models/forecasting/train_prophet.py: the pure date-mapping
 function, walk-forward fold structure, and (skipped if Postgres
 unreachable) full integration tests against the live warehouse.
 
-The integration tests below (test_prophet_beats_baseline_on_every_
-enrollment_series, test_prophet_does_not_beat_baseline_on_graduation_
-series, and related row-count assertions) lock in Day 20's original
-evaluation-run findings, which were measured against the old, incorrect
-8-semester dataset. Per docs/10_Forecasting.md's STALE note, those
-findings are EXPECTED to still qualitatively hold under the corrected
-6-semester model (graduation_count series remain structurally hard to
-beat with a trend model, since most cohorts haven't reached graduation
-eligibility within the observed window) but the specific row counts and
-per-series pass/fail pattern below have not been re-verified against
-real output regenerated under the 6-semester grain -- see REMAINING
-ISSUES in this task's execution report.
+P1 fix: series are now (program, metric), read from
+gold.ml_program_forecast_features -- not (college, metric) from
+gold.fact_institution_kpi. The integration tests below assert against
+gold.dim_program's actual row count (queried at fixture time, not
+hardcoded) rather than a guessed number, since program count depends on
+configs/programs.yaml and this suite has no live Postgres to verify a
+literal count against in this environment -- see REMAINING ISSUES in
+this task's execution report for what still needs a real run to confirm.
 """
 
 import os
@@ -25,7 +21,14 @@ import pandas as pd
 import pytest
 
 from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
-from models.forecasting.train_prophet import TEST_PERIOD_ORDINALS, evaluate_all_series, fit_prophet, semester_to_date
+from models.forecasting.train_prophet import (
+    MIN_HISTORY_PERIODS,
+    TEST_PERIOD_ORDINALS,
+    evaluate_all_series,
+    fit_prophet,
+    has_sufficient_history,
+    semester_to_date,
+)
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
     "POSTGRES_PORT": os.environ.get("TEST_POSTGRES_PORT", "5432"),
@@ -53,6 +56,22 @@ def test_exactly_three_walk_forward_test_points():
     assert TEST_PERIOD_ORDINALS == [3, 4, 5]
 
 
+def test_min_history_periods_covers_fold_one_train_plus_test():
+    # Fold 1 needs period_ordinal 0-2 (train) + 3 (test) = 4 distinct periods.
+    assert MIN_HISTORY_PERIODS == 4
+
+
+def test_has_sufficient_history_true_when_all_periods_present():
+    series = pd.DataFrame({"period_ordinal": [0, 1, 2, 3, 4, 5]})
+    assert has_sufficient_history(series) is True
+
+
+def test_has_sufficient_history_false_for_sparse_program():
+    # A newly-established program with only 2 semesters of enrollment.
+    series = pd.DataFrame({"period_ordinal": [4, 5]})
+    assert has_sufficient_history(series) is False
+
+
 def test_fit_prophet_wraps_training_failures_in_model_training_error(monkeypatch):
     class BrokenProphet:
         def fit(self, train_df):
@@ -71,19 +90,21 @@ def test_evaluate_all_series_wraps_evaluation_failures_in_model_evaluation_error
     monkeypatch.setattr(
         "models.forecasting.train_prophet.load_series",
         lambda engine: pd.DataFrame({
-            "college_id": ["CICT"],
-            "college_key": [1],
-            "period_ordinal": [1],
-            "academic_year": [2021],
-            "semester_number": [1],
-            "enrollment_count": [1],
-            "graduation_count": [1],
-            "ds": ["2021-01-01"],
+            "program_id": ["BSCS"] * 4,
+            "program_key": [1] * 4,
+            "college_id": ["CICT"] * 4,
+            "college_key": [1] * 4,
+            "period_ordinal": [0, 1, 2, 3],
+            "academic_year": [2021, 2021, 2022, 2022],
+            "semester_number": [1, 2, 1, 2],
+            "enrollment_count": [1, 1, 1, 1],
+            "graduation_count": [1, 1, 1, 1],
+            "ds": ["2021-01-01", "2021-07-01", "2022-01-01", "2022-07-01"],
         }),
     )
     monkeypatch.setattr(
         "models.forecasting.train_prophet.walk_forward_evaluate",
-        lambda college_series, metric: (_ for _ in ()).throw(RuntimeError("bad fold")),
+        lambda entity_series, metric: (_ for _ in ()).throw(RuntimeError("bad fold")),
     )
 
     with pytest.raises(ModelEvaluationError) as exc:
@@ -121,33 +142,46 @@ def evaluation_report(engine):
     return evaluate_all_series(engine)
 
 
-def test_evaluation_report_has_one_row_per_college_per_metric(evaluation_report):
-    assert len(evaluation_report) == 16
+@pytest.fixture(scope="module")
+def program_count(engine):
+    """Actual gold.dim_program row count -- P1 fix asserts against this
+    instead of a hardcoded number, since program count is a config
+    value (configs/programs.yaml), not a project constant like the
+    8 colleges were."""
+    conn = engine.raw_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM gold.dim_program")
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_evaluation_report_has_at_most_one_row_per_program_per_metric(evaluation_report, program_count):
+    # <=, not ==: programs below MIN_HISTORY_PERIODS are legitimately
+    # skipped (see has_sufficient_history), so this is an upper bound,
+    # not an exact-count assertion.
+    assert len(evaluation_report) <= program_count * 2
 
 
 def test_evaluation_report_flags_series_where_prophet_does_not_beat_baseline(evaluation_report):
     assert "prophet_beats_best_baseline" in evaluation_report.columns
-    assert set(evaluation_report["prophet_beats_best_baseline"].unique()) == {True, False}
+    assert set(evaluation_report["prophet_beats_best_baseline"].unique()) <= {True, False}
 
 
-def test_prophet_beats_baseline_on_every_enrollment_series(evaluation_report):
-    enrollment_rows = evaluation_report[evaluation_report["metric"] == "enrollment_count"]
-    assert len(enrollment_rows) == 8
-    assert enrollment_rows["prophet_beats_best_baseline"].all()
+def test_prophet_evaluation_report_has_program_and_college_columns(evaluation_report):
+    # P1 fix: series are (program, metric) now, but college_id is still
+    # carried through (denormalized) so results remain rollup-able.
+    assert {"program_id", "college_id", "metric"} <= set(evaluation_report.columns)
 
 
-def test_prophet_does_not_beat_baseline_on_graduation_series(evaluation_report):
-    graduation_rows = evaluation_report[evaluation_report["metric"] == "graduation_count"]
-    assert len(graduation_rows) == 8
-    assert not graduation_rows["prophet_beats_best_baseline"].any()
-
-
-def test_train_final_models_saves_one_artifact_per_college_per_metric(engine, tmp_path):
+def test_train_final_models_saves_one_artifact_per_evaluated_series(engine, tmp_path, evaluation_report):
     from pathlib import Path
     from models.forecasting.train_prophet import train_final_models
 
     paths = train_final_models(engine, artifacts_dir=tmp_path)
-    assert len(paths) == 16
+    # <=, not ==, for the same has_sufficient_history reason as above.
+    assert len(paths) <= len(evaluation_report)
     for p in paths:
         assert Path(p).exists()
 

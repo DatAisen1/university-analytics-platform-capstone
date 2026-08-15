@@ -303,13 +303,19 @@ class MLEnrollmentFeaturesByYearLevel(Base):
 class ModelRegistry(Base):
     __tablename__ = "model_registry"
     __table_args__ = (
-        UniqueConstraint("college_key", "metric", "model_version", name="uq_gold_model_registry_college_metric_version"),
+        # P1 fix (migration 0013): grain moved from (college, metric) to
+        # (program, metric) -- Prophet trains against
+        # gold.ml_program_forecast_features (program grain), not
+        # gold.fact_institution_kpi (college grain). college_key is kept
+        # as a denormalized, nullable convenience column, not the grain key.
+        UniqueConstraint("program_key", "metric", "model_version", name="uq_gold_model_registry_program_metric_version"),
         CheckConstraint("metric IN ('enrollment_count', 'graduation_count')", name="ck_gold_model_registry_metric"),
         {"schema": "gold"},
     )
 
     model_registry_key: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    college_key: Mapped[int] = mapped_column(SmallInteger, ForeignKey("gold.dim_college.college_key", name="fk_gold_model_registry_college"), nullable=False, index=True)
+    program_key: Mapped[int] = mapped_column(Integer, ForeignKey("gold.dim_program.program_key", name="fk_gold_model_registry_program"), nullable=False, index=True)
+    college_key: Mapped[int | None] = mapped_column(SmallInteger, ForeignKey("gold.dim_college.college_key", name="fk_gold_model_registry_college"), nullable=True)
     metric: Mapped[str] = mapped_column(String(32), nullable=False)
     model_version: Mapped[str] = mapped_column(String(64), nullable=False)
     trained_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
@@ -337,7 +343,8 @@ class ModelRegistry(Base):
 class FactForecast(Base):
     __tablename__ = "fact_forecast"
     __table_args__ = (
-        UniqueConstraint("college_key", "metric", "target_period_ordinal", "model_version", name="uq_gold_fact_forecast_college_metric_period_version"),
+        # P1 fix (migration 0013): same grain move as ModelRegistry above.
+        UniqueConstraint("program_key", "metric", "target_period_ordinal", "model_version", name="uq_gold_fact_forecast_program_metric_period_version"),
         CheckConstraint("metric IN ('enrollment_count', 'graduation_count')", name="ck_gold_fact_forecast_metric"),
         CheckConstraint("target_semester_number IN (1, 2)", name="ck_gold_fact_forecast_semester_number"),
         CheckConstraint("yhat >= 0", name="ck_gold_fact_forecast_yhat_nonnegative"),
@@ -345,7 +352,8 @@ class FactForecast(Base):
     )
 
     fact_forecast_key: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    college_key: Mapped[int] = mapped_column(SmallInteger, ForeignKey("gold.dim_college.college_key", name="fk_gold_fact_forecast_college"), nullable=False)
+    program_key: Mapped[int] = mapped_column(Integer, ForeignKey("gold.dim_program.program_key", name="fk_gold_fact_forecast_program"), nullable=False, index=True)
+    college_key: Mapped[int | None] = mapped_column(SmallInteger, ForeignKey("gold.dim_college.college_key", name="fk_gold_fact_forecast_college"), nullable=True)
     metric: Mapped[str] = mapped_column(String(32), nullable=False)
     target_academic_year: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     target_semester_number: Mapped[int] = mapped_column(SmallInteger, nullable=False)

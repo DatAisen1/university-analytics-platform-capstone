@@ -1,13 +1,25 @@
 """
 models/forecasting/train_prophet.py
 
-Trains a Prophet model per (college, target metric), evaluates it via
+Trains a Prophet model per (program, target metric), evaluates it via
 walk-forward validation against the exact 3 folds docs/10_Forecasting.md
 Section 5 specifies for the canonical 6-semester (2021-2022 through
 2023-2024) dataset horizon, compares it against the two required
 baselines (naive, historical-average), and refits a final model on the
 full history for each series (used by Day 21 to actually forecast the
 next semester).
+
+P1 (Data Science Recovery) fix: series now come from
+gold.ml_program_forecast_features (pipelines/gold/build_ml_features.py,
+Task 31-33's dedicated, leakage-safe, fingerprinted forecast dataset --
+grain (college, program, academic_period)), not from a hand-rolled query
+against gold.fact_institution_kpi. The KPI fact table is COLLEGE grain
+by deliberate design (see build_kpi.py's module docstring) and was never
+meant to be the forecasting contract; the feature table already existed
+for exactly this purpose but had no consumer until this fix. This also
+moves the forecast grain from (college, metric) to (program, metric) --
+see migrations/versions/0013_forecast_program_grain.py for the schema
+side of this change.
 
 Only 3 walk-forward folds are available under the 6-period grain (down
 from 4 under a previous, incorrect 8-semester draft) -- a direct,
@@ -25,6 +37,15 @@ Each fold trains ONLY on data strictly before its test point -- the
 walk-forward discipline docs/10_Forecasting.md requires specifically
 because standard k-fold CV would shuffle future information into
 training for a time series, producing artificially optimistic accuracy.
+
+MIN_HISTORY_PERIODS guard: moving to program grain means many more,
+smaller series than college grain (a program can have far fewer students
+per semester than a whole college). A series with fewer distinct
+periods than Fold 1 requires (period_ordinal 0-2 train, 3 test) has no
+usable fold at all -- Prophet.fit on 0-1 rows raises, and computing
+metrics over an empty actual/predicted list produces silent NaNs that
+would otherwise corrupt decide_promotion's comparisons. Such series are
+skipped and reported, not silently dropped or allowed to crash the run.
 
 Semester-to-date mapping: semester_number 1 -> Jan 1 of academic_year,
 semester_number 2 -> Jul 1 -- the same convention dim_calendar (Day 12)
@@ -54,6 +75,11 @@ DEFAULT_ARTIFACTS_DIR = _REPO_ROOT / "forecasting" / "artifacts"
 TARGET_METRICS = ["enrollment_count", "graduation_count"]
 TEST_PERIOD_ORDINALS = [3, 4, 5]  # the 3 walk-forward test points, per the fold table above
 
+# Fold 1 needs period_ordinal 0-2 (train) + 3 (test) present -- 4 distinct
+# periods is the minimum for even one usable fold. Below this, a series
+# is skipped rather than fed to Prophet/metrics (see module docstring).
+MIN_HISTORY_PERIODS = 4
+
 
 def semester_to_date(academic_year: int, semester_number: int) -> str:
     month_day = "01-01" if semester_number == 1 else "07-01"
@@ -61,28 +87,44 @@ def semester_to_date(academic_year: int, semester_number: int) -> str:
 
 
 def load_series(engine) -> pd.DataFrame:
-    """One row per (college, period): college_key, college_id,
-    period_ordinal, ds, and each target metric's actual value.
+    """One row per (program, period): program_key, program_id,
+    college_key, college_id, period_ordinal, ds, and each target
+    metric's actual value.
 
-    Fixed to reference gold.dim_academic_period / academic_period_key --
-    gold.dim_semester / semester_key no longer exist post Task 23/24's
-    dimensional redesign. Ordered by period_ordinal, not the
-    academic_period_key surrogate, for the same chronological-ordering
-    reason documented in build_kpi.py and build_ml_features.py.
+    P1 fix: reads gold.ml_program_forecast_features -- the dedicated,
+    leakage-safe forecast dataset (pipelines/gold/build_ml_features.py) --
+    instead of querying gold.fact_institution_kpi (college grain)
+    directly. Only the raw target columns are selected here; the
+    feature table's own lag/rolling/trend columns are not used as
+    Prophet regressors (Prophet's univariate ds/y fit is unchanged) --
+    consuming them is a separate, future enhancement, not required to
+    fix the "arbitrary warehouse table" contract violation this task
+    addresses.
+
+    Ordered by period_ordinal, not the academic_period_key surrogate,
+    for the same chronological-ordering reason documented in
+    build_kpi.py and build_ml_features.py.
     """
     sql = f"""
         SELECT
-            kpi.college_key, col.college_id, ap.period_ordinal,
-            ap.academic_year, ap.semester_number,
-            {', '.join(f'kpi.{m}' for m in TARGET_METRICS)}
-        FROM gold.fact_institution_kpi kpi
-        JOIN gold.dim_college col ON kpi.college_key = col.college_key
-        JOIN gold.dim_academic_period ap ON kpi.academic_period_key = ap.academic_period_key
-        ORDER BY kpi.college_key, ap.period_ordinal
+            mf.program_key, p.program_id, mf.college_key, col.college_id,
+            mf.period_ordinal, mf.academic_year, mf.semester_number,
+            {', '.join(f'mf.{m}' for m in TARGET_METRICS)}
+        FROM gold.ml_program_forecast_features mf
+        JOIN gold.dim_program p ON mf.program_key = p.program_key
+        JOIN gold.dim_college col ON mf.college_key = col.college_key
+        ORDER BY mf.program_key, mf.period_ordinal
     """
     df = pd.read_sql(sql, engine)
     df["ds"] = df.apply(lambda r: semester_to_date(int(r["academic_year"]), int(r["semester_number"])), axis=1)
     return df
+
+
+def has_sufficient_history(series: pd.DataFrame) -> bool:
+    """True iff `series` (already filtered to one program) has enough
+    distinct periods for at least one walk-forward fold. See
+    MIN_HISTORY_PERIODS docstring above."""
+    return series["period_ordinal"].nunique() >= MIN_HISTORY_PERIODS
 
 
 def fit_prophet(train_df: pd.DataFrame):
@@ -113,13 +155,15 @@ def predict_point(model, ds: str) -> float:
 
 
 def walk_forward_evaluate(
-    college_series: pd.DataFrame, metric: str
+    entity_series: pd.DataFrame, metric: str
 ) -> Dict[str, Dict[str, List[float]]]:
-    """Run all 3 walk-forward folds for one (college, metric) series.
+    """Run all 3 walk-forward folds for one (program, metric) series.
+    Grain-agnostic by construction (only reads period_ordinal/ds/metric
+    columns) -- callers decide what `entity_series` is filtered to.
     Returns {model_name: {"actual": [...], "predicted": [...]}} with one
     entry per fold, for prophet/naive/historical_avg.
     """
-    series = college_series.sort_values("period_ordinal").reset_index(drop=True)
+    series = entity_series.sort_values("period_ordinal").reset_index(drop=True)
     results: Dict[str, Dict[str, List[float]]] = {
         "prophet": {"actual": [], "predicted": []},
         "naive": {"actual": [], "predicted": []},
@@ -163,18 +207,29 @@ def compute_metrics_for_model(actual: List[float], predicted: List[float]) -> Di
 
 
 def evaluate_all_series(engine) -> pd.DataFrame:
-    """Evaluate every (college, metric) combination via walk-forward
+    """Evaluate every (program, metric) combination via walk-forward
     validation, comparing Prophet against both baselines. Returns one row
-    per (college, metric) with each model's metrics and a
-    prophet_beats_best_baseline flag."""
+    per (program, metric) with each model's metrics and a
+    prophet_beats_best_baseline flag.
+
+    Programs with fewer than MIN_HISTORY_PERIODS distinct periods are
+    skipped (logged, not silently dropped) -- see module docstring."""
     df = load_series(engine)
     rows = []
 
     try:
-        for college_id in sorted(df["college_id"].unique()):
-            college_series = df[df["college_id"] == college_id]
+        for program_id in sorted(df["program_id"].unique()):
+            program_series = df[df["program_id"] == program_id]
+            if not has_sufficient_history(program_series):
+                logging.getLogger(__name__).info(
+                    "Skipping program %s: only %d distinct period(s), need >= %d for one walk-forward fold",
+                    program_id, program_series["period_ordinal"].nunique(), MIN_HISTORY_PERIODS,
+                )
+                continue
+
+            college_id = program_series["college_id"].iloc[0]
             for metric in TARGET_METRICS:
-                fold_results = walk_forward_evaluate(college_series, metric)
+                fold_results = walk_forward_evaluate(program_series, metric)
 
                 model_metrics = {
                     name: compute_metrics_for_model(r["actual"], r["predicted"])
@@ -185,6 +240,7 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                 beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
 
                 rows.append({
+                    "program_id": program_id,
                     "college_id": college_id,
                     "metric": metric,
                     "prophet_mae": model_metrics["prophet"]["mae"],
@@ -205,19 +261,25 @@ def evaluate_all_series(engine) -> pd.DataFrame:
 
 
 def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> List[str]:
-    """Refit one Prophet model per (college, metric) on the FULL 6-semester
+    """Refit one Prophet model per (program, metric) on the FULL 6-semester
     history (not a walk-forward fold) and pickle it -- these are the
-    models Day 21 loads to actually forecast period_ordinal 6 (2024-1)."""
+    models Day 21 loads to actually forecast period_ordinal 6 (2024-1).
+
+    Programs with fewer than MIN_HISTORY_PERIODS distinct periods are
+    skipped -- same guard as evaluate_all_series, for the same reason
+    (Prophet.fit needs at least 2 rows; a fold-1-eligible series has more)."""
     df = load_series(engine)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
 
-    for college_id in sorted(df["college_id"].unique()):
-        college_series = df[df["college_id"] == college_id].sort_values("period_ordinal")
+    for program_id in sorted(df["program_id"].unique()):
+        program_series = df[df["program_id"] == program_id].sort_values("period_ordinal")
+        if not has_sufficient_history(program_series):
+            continue
         for metric in TARGET_METRICS:
-            train_df = college_series.rename(columns={metric: "y"})
+            train_df = program_series.rename(columns={metric: "y"})
             model = fit_prophet(train_df)
-            path = artifacts_dir / f"{college_id}_{metric}_prophet.pkl"
+            path = artifacts_dir / f"{program_id}_{metric}_prophet.pkl"
             with path.open("wb") as f:
                 pickle.dump(model, f)
             saved_paths.append(str(path))
@@ -242,13 +304,13 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         f"Prophet beats the best baseline on **{beats_count} of {total}** series "
         f"({beats_count / total:.0%}).",
         "",
-        "| College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Prophet R\u00b2 | Beats Baseline? |",
-        "|---|---|---|---|---|---|---|",
+        "| Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Prophet R\u00b2 | Beats Baseline? |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for _, row in report_df.iterrows():
         flag = "\u2705" if row["prophet_beats_best_baseline"] else "\u26a0\ufe0f NO"
         lines.append(
-            f"| {row['college_id']} | {row['metric']} | {row['prophet_mae']:.2f} | "
+            f"| {row['program_id']} | {row['college_id']} | {row['metric']} | {row['prophet_mae']:.2f} | "
             f"{row['naive_mae']:.2f} | {row['historical_avg_mae']:.2f} | "
             f"{row['prophet_r2']:.3f} | {flag} |"
         )

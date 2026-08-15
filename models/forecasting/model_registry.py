@@ -94,7 +94,8 @@ class ModelRecord:
     audit trail rather than just the MAE decide_promotion needs."""
 
     model_registry_key: int
-    college_key: int
+    program_key: int
+    college_key: Optional[int]
     metric: str
     model_version: str
     algorithm: Optional[str]
@@ -126,7 +127,7 @@ class RetrainDecision:
     reason: str
 
 
-def get_last_trained_period_ordinal(engine, college_key: int, metric: str) -> Optional[int]:
+def get_last_trained_period_ordinal(engine, program_key: int, metric: str) -> Optional[int]:
     """Return the last training window end for a series, if the registry is available."""
     if engine is None:
         return None
@@ -137,11 +138,11 @@ def get_last_trained_period_ordinal(engine, college_key: int, metric: str) -> Op
                 """
                 SELECT training_data_end_period_ordinal
                 FROM gold.model_registry
-                WHERE college_key = %s AND metric = %s
+                WHERE program_key = %s AND metric = %s
                 ORDER BY trained_at DESC, model_registry_key DESC
                 LIMIT 1
                 """,
-                (college_key, metric),
+                (program_key, metric),
             )
             row = cur.fetchone()
         conn.close()
@@ -150,7 +151,7 @@ def get_last_trained_period_ordinal(engine, college_key: int, metric: str) -> Op
     return None if row is None or row[0] is None else int(row[0])
 
 
-def get_current_champion(engine, college_key: int, metric: str) -> Optional[ChampionRecord]:
+def get_current_champion(engine, program_key: int, metric: str) -> Optional[ChampionRecord]:
     """Return the current champion row for a series, if one exists."""
     if engine is None:
         return None
@@ -161,11 +162,11 @@ def get_current_champion(engine, college_key: int, metric: str) -> Optional[Cham
                 """
                 SELECT model_registry_key, model_version, mae, artifact_path
                 FROM gold.model_registry
-                WHERE college_key = %s AND metric = %s AND is_champion IS TRUE
+                WHERE program_key = %s AND metric = %s AND is_champion IS TRUE
                 ORDER BY trained_at DESC, model_registry_key DESC
                 LIMIT 1
                 """,
-                (college_key, metric),
+                (program_key, metric),
             )
             row = cur.fetchone()
         conn.close()
@@ -183,15 +184,20 @@ def get_current_champion(engine, college_key: int, metric: str) -> Optional[Cham
 
 def record_candidate(
     engine,
-    college_key: int,
+    program_key: int,
     metric: str,
     model_version: str,
     candidate: CandidateMetrics,
     training_meta: TrainingMetadata,
     artifact_path: str,
     decision: PromotionDecision,
+    college_key: Optional[int] = None,
 ) -> int:
-    """Insert a candidate row into gold.model_registry and return its key."""
+    """Insert a candidate row into gold.model_registry and return its key.
+
+    college_key is the denormalized, informational convenience column
+    (see migration 0013) -- program_key is the actual grain key used for
+    every WHERE clause in this module."""
     if engine is None:
         return 0
     try:
@@ -203,22 +209,23 @@ def record_candidate(
                         """
                         UPDATE gold.model_registry
                         SET is_champion = FALSE
-                        WHERE college_key = %s AND metric = %s AND is_champion IS TRUE
+                        WHERE program_key = %s AND metric = %s AND is_champion IS TRUE
                         """,
-                        (college_key, metric),
+                        (program_key, metric),
                     )
                 cur.execute(
                     """
                     INSERT INTO gold.model_registry (
-                        college_key, metric, model_version, mae, rmse, mape, r2,
+                        program_key, college_key, metric, model_version, mae, rmse, mape, r2,
                         best_baseline_mae, beats_baseline, is_champion, rejected_reason,
                         artifact_path, algorithm, training_data_start_period_ordinal,
                         training_data_end_period_ordinal, training_record_count
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING model_registry_key
                     """,
                     (
+                        program_key,
                         college_key,
                         metric,
                         model_version,
@@ -316,11 +323,14 @@ def should_retrain(current_max_period_ordinal: int, last_trained_period_ordinal:
     )
 
 
-def make_model_version(college_id: str, metric: str, trained_at: Optional[datetime] = None) -> str:
+def make_model_version(program_id: str, metric: str, trained_at: Optional[datetime] = None) -> str:
     """Deterministic, sortable, globally-unique model_version string,
-    e.g. 'CICT_enrollment_count_20260802T140501Z'."""
+    e.g. 'BSCS_enrollment_count_20260802T140501Z'.
+
+    P1 fix: keyed by program_id, not college_id -- the grain moved from
+    (college, metric) to (program, metric); see migration 0013."""
     trained_at = trained_at or datetime.now(timezone.utc)
-    return f"{college_id}_{metric}_{trained_at.strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{program_id}_{metric}_{trained_at.strftime('%Y%m%dT%H%M%SZ')}"
 
 
 # --------------------------------------
