@@ -1,6 +1,6 @@
 # 11 — Data Consumption Contract (formerly "Dashboard Design")
 
-> **This document replaces the previous `11_Dashboard.md`.** This repo (Data Engineering + Data Science) does not build, own, or operate dashboards. That responsibility belongs to the **Web Team**. This document defines the *contract* between the two teams — what's published, how it's accessed, and what questions it's designed to answer — so the Web Team can build whatever presentation layer they choose against a stable, tested, documented interface.
+> **Note:** this file was originally named `11_Dashboard.md`; it has since been renamed to match its actual scope. This repo (Data Engineering + Data Science) does not build, own, or operate dashboards. That responsibility belongs to the **Web Team**. This document defines the *contract* between the two teams — what's published, how it's accessed, and what questions it's designed to answer — so the Web Team can build whatever presentation layer they choose against a stable, tested, documented interface.
 
 ## 1. Design Principle
 

@@ -1,5 +1,7 @@
 # 12 — 30-Day Implementation Roadmap
 
+> **Status: historical build log.** This was written as a forward-looking plan before the build started; the platform has since progressed well past several of these days (see `04_Data_Modeling.md`'s "Task 23/24" notes and `docs/16`/`17`/`18`/`19`/`20` for what was actually implemented, including corrections to what's outlined below). Keep this doc as a record of the original plan and process — useful for a capstone writeup — but treat `01`–`11` and `15`–`20` as the current source of truth for what the system actually does today, not this file.
+
 ## How to Use This Roadmap
 
 Each day follows the same template: **Objectives → Concepts to Learn → Dev Tasks → Expected Output → Git Commit → Deliverables → Validation Checklist → Testing Checklist → Documentation Task.**
