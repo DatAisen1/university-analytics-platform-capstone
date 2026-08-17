@@ -45,14 +45,27 @@ instead of failing later on the GRANT statements below with a confusing
 "role does not exist"). This makes the bare CLI self-sufficient:
 `alembic upgrade head` against a brand-new database now succeeds on its
 own, no separate wrapper script required first.
+
+Bug fix: this originally read the four passwords via a bare
+os.environ.get()/os.environ[...] -- which, like migrations/env.py's
+former ALEMBIC_DATABASE_URL handling (same root cause, found and fixed
+separately), never loads .env at all, only real process-environment
+variables. A developer with a perfectly correct .env would still hit
+"Missing environment variable(s)" here unless they'd manually exported
+every value into their shell first. Now reads through
+pipelines.common.settings.get_postgres_settings().service_role_passwords()
+-- the SAME centralized, .env-aware, validated config layer
+bootstrap_roles() itself already uses (pipelines/common/postgres.py) --
+so a value present in .env is found here exactly as it is everywhere
+else in this codebase, with one source of truth for "where do these
+four passwords come from" instead of two.
 """
-import os
 
 from alembic import op
 from sqlalchemy import text
 
 from pipelines.common.postgres import SERVICE_ROLES
-from pipelines.common.settings import SettingsError
+from pipelines.common.settings import SettingsError, get_postgres_settings
 
 revision = "0002"
 down_revision = "0001"
@@ -79,18 +92,18 @@ def _create_roles_if_missing() -> None:
     migration transaction (CREATE ROLE is transactional in Postgres, so
     this is safe to run here -- see the module docstring for why this
     does NOT reuse bootstrap_roles() directly)."""
-    missing_env_vars = [
-        env_var for env_var in _ROLE_PASSWORD_ENV_VARS.values()
-        if not os.environ.get(env_var)
-    ]
+    passwords = get_postgres_settings().service_role_passwords()
+    missing_env_vars = sorted(
+        env_var for role, env_var in _ROLE_PASSWORD_ENV_VARS.items()
+        if not passwords.get(role)
+    )
     if missing_env_vars:
         raise SettingsError(
             "Migration 0002_grants needs the four service-role passwords "
             "to create pipeline_writer/dbt_role/dashboard_reader/"
             f"analyst_readonly before granting to them. Missing environment "
-            f"variable(s): {sorted(missing_env_vars)}. Set these (see "
-            f".env.example), e.g. `export $(grep -v '^#' .env | xargs)`, "
-            f"before running `alembic upgrade head`."
+            f"variable(s): {missing_env_vars}. Set these in .env "
+            f"(see .env.example), then re-run `alembic upgrade head`."
         )
 
     bind = op.get_bind()
@@ -107,7 +120,7 @@ def _create_roles_if_missing() -> None:
                 $$;
                 """
             ),
-            {"role": role, "password": os.environ[env_var]},
+            {"role": role, "password": passwords[role]},
         )
 
 

@@ -28,7 +28,12 @@ Section 5). With this few folds, per-fold metrics are a point estimate
 with wide, disclosed uncertainty, not a precise accuracy figure.
 
 Walk-forward folds (docs/10_Forecasting.md, period_ordinal terms --
-period_ordinal is 0-based; see pipelines/gold/build_dimensions.py):
+period_ordinal is 0-based; see pipelines/gold/build_dimensions.py) for
+the CURRENT 6-period observed history -- derive_test_period_ordinals()
+derives
+these from the dataset's actual max period_ordinal (P1.14 fix), so this
+table shifts automatically as OBSERVED_ACADEMIC_YEARS grows; it is not
+a hardcoded literal anymore:
   Fold 1: train period_ordinal 0-2, test period_ordinal 3 (2022-2)
   Fold 2: train period_ordinal 0-3, test period_ordinal 4 (2023-1)
   Fold 3: train period_ordinal 0-4, test period_ordinal 5 (2023-2)
@@ -59,7 +64,7 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
@@ -73,7 +78,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ARTIFACTS_DIR = _REPO_ROOT / "forecasting" / "artifacts"
 
 TARGET_METRICS = ["enrollment_count", "graduation_count"]
-TEST_PERIOD_ORDINALS = [3, 4, 5]  # the 3 walk-forward test points, per the fold table above
 
 # Fold 1 needs period_ordinal 0-2 (train) + 3 (test) present -- 4 distinct
 # periods is the minimum for even one usable fold. Below this, a series
@@ -81,9 +85,117 @@ TEST_PERIOD_ORDINALS = [3, 4, 5]  # the 3 walk-forward test points, per the fold
 MIN_HISTORY_PERIODS = 4
 
 
+def derive_test_period_ordinals(max_period_ordinal: int) -> List[int]:
+    """P1.14 fix: the 3 walk-forward test points, DERIVED from the
+    highest period_ordinal actually present in the observed data,
+    instead of the literal [3, 4, 5] this used to be hardcoded to.
+
+    Named derive_ (not test_) deliberately: pytest collects any callable
+    named test_* that lands in a test module's namespace as a test item
+    -- and tests/unit/test_train_prophet.py imports this function by
+    name, so a bare `test_period_ordinals` was collected as a phantom
+    test requiring a nonexistent `max_period_ordinal` fixture,
+    erroring at collection. Caught by running the real suite (this
+    isn't reachable from unit-testing this function in isolation).
+
+    That literal was only ever correct because OBSERVED_ACADEMIC_YEARS
+    (pipelines/common/silver_schemas.py) happened to produce exactly 6
+    periods (ordinals 0-5) when it was written -- nothing connected the
+    two, so the day observed history grows (a new academic year added),
+    the literal would silently stop matching the fold table in
+    docs/10_Forecasting.md Section 5 without any test catching it.
+
+    Always returns the last 3 distinct ordinals up to and including
+    max_period_ordinal, matching the existing fold table's shape
+    (3 folds, each testing one held-out semester strictly after its
+    training data) for any dataset horizon >= 4 periods.
+    """
+    return [max_period_ordinal - 2, max_period_ordinal - 1, max_period_ordinal]
+
+
 def semester_to_date(academic_year: int, semester_number: int) -> str:
     month_day = "01-01" if semester_number == 1 else "07-01"
     return f"{academic_year}-{month_day}"
+
+
+def to_prophet_frame(series: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Convert a (program, period) series into the exact ds/y frame
+    Prophet.fit/predict requires (P1.10-P1.13).
+
+    Centralizes what used to be three independent, unvalidated
+    `.rename(columns={metric: "y"})` call sites (here, in
+    train_final_models, and in deploy_forecast.py) -- each renamed the
+    column but none of them validated it, so a null metric value, a
+    non-numeric dtype, or an out-of-order/duplicated period could reach
+    Prophet.fit silently and fail there with an opaque Stan error
+    instead of a clear, attributable one at the actual contract boundary.
+
+    Validates (raising ModelTrainingError -- the standard PipelineError
+    category every other training failure uses, not a bare
+    ValueError/AssertionError):
+      ds: convertible to datetime, non-null, unique per series
+      y:  present, numeric, non-null, non-negative (both target metrics
+          are COUNT(*) aggregates -- a negative count is a contract
+          violation, not a valid forecast input)
+
+    Returns a NEW frame (['ds', 'y']) sorted by ds -- callers no longer
+    need their own `.sort_values(...)` before fitting.
+    """
+    if "ds" not in series.columns:
+        raise ModelTrainingError(
+            "Cannot build Prophet frame: 'ds' column missing from series",
+            stage="Prophet Adapter", entity=metric,
+        )
+    if metric not in series.columns:
+        raise ModelTrainingError(
+            f"Cannot build Prophet frame: column '{metric}' not present in series",
+            stage="Prophet Adapter", entity=metric,
+        )
+
+    frame = series[["ds", metric]].rename(columns={metric: "y"}).copy()
+
+    try:
+        frame["ds"] = pd.to_datetime(frame["ds"], errors="raise")
+    except (ValueError, TypeError) as exc:
+        raise ModelTrainingError(
+            f"Prophet frame 'ds' column is not convertible to datetime: {exc}",
+            stage="Prophet Adapter", entity=metric,
+        ) from exc
+
+    if frame["ds"].isna().any():
+        raise ModelTrainingError(
+            "Prophet frame has null ds value(s) after datetime conversion",
+            stage="Prophet Adapter", entity=metric,
+            rows_affected=int(frame["ds"].isna().sum()),
+        )
+    if not pd.api.types.is_numeric_dtype(frame["y"]):
+        raise ModelTrainingError(
+            f"Prophet frame 'y' column for metric '{metric}' is not numeric "
+            f"(dtype={frame['y'].dtype})",
+            stage="Prophet Adapter", entity=metric,
+        )
+    if frame["y"].isna().any():
+        raise ModelTrainingError(
+            f"Prophet frame has null y value(s) for metric '{metric}'",
+            stage="Prophet Adapter", entity=metric,
+            rows_affected=int(frame["y"].isna().sum()),
+        )
+    if (frame["y"] < 0).any():
+        raise ModelTrainingError(
+            f"Prophet frame 'y' column for metric '{metric}' has negative "
+            f"value(s) -- counts cannot be negative",
+            stage="Prophet Adapter", entity=metric,
+            rows_affected=int((frame["y"] < 0).sum()),
+        )
+    if frame["ds"].duplicated().any():
+        raise ModelTrainingError(
+            "Prophet frame has duplicate ds values -- exactly one row per "
+            "period is required",
+            stage="Prophet Adapter", entity=metric,
+            rows_affected=int(frame["ds"].duplicated().sum()),
+        )
+
+    return frame.sort_values("ds").reset_index(drop=True)
 
 
 def load_series(engine) -> pd.DataFrame:
@@ -116,6 +228,17 @@ def load_series(engine) -> pd.DataFrame:
         ORDER BY mf.program_key, mf.period_ordinal
     """
     df = pd.read_sql(sql, engine)
+    if df.empty:
+        # pandas' df.apply(func, axis=1) on a 0-row frame can't infer the
+        # lambda's return type and returns an empty DataFrame instead of
+        # an empty Series -- df["ds"] = <DataFrame> then raises
+        # ValueError: Cannot set a DataFrame with multiple columns to the
+        # single column ds. A fresh database with the pipeline not yet
+        # run produces exactly this (0 rows), so this must be handled
+        # explicitly rather than relying on apply's row-count-dependent
+        # return type.
+        df["ds"] = pd.Series(dtype="object")
+        return df
     df["ds"] = df.apply(lambda r: semester_to_date(int(r["academic_year"]), int(r["semester_number"])), axis=1)
     return df
 
@@ -155,22 +278,34 @@ def predict_point(model, ds: str) -> float:
 
 
 def walk_forward_evaluate(
-    entity_series: pd.DataFrame, metric: str
+    entity_series: pd.DataFrame, metric: str, test_ordinals: Optional[List[int]] = None
 ) -> Dict[str, Dict[str, List[float]]]:
     """Run all 3 walk-forward folds for one (program, metric) series.
     Grain-agnostic by construction (only reads period_ordinal/ds/metric
     columns) -- callers decide what `entity_series` is filtered to.
     Returns {model_name: {"actual": [...], "predicted": [...]}} with one
     entry per fold, for prophet/naive/historical_avg.
+
+    P1.14 fix: `test_ordinals` is now a parameter, derived (via
+    derive_test_period_ordinals()) from the dataset's actual max period_ordinal
+    rather than the module-level [3, 4, 5] literal this used to read.
+    Callers evaluating many series (evaluate_all_series) should compute
+    this ONCE from the full dataset and pass it explicitly, so every
+    series is scored against the same fold boundaries -- the default
+    (derive from this series alone) exists only for callers evaluating
+    a single series in isolation, e.g. in tests.
     """
     series = entity_series.sort_values("period_ordinal").reset_index(drop=True)
+    if test_ordinals is None:
+        test_ordinals = derive_test_period_ordinals(int(series["period_ordinal"].max()))
+
     results: Dict[str, Dict[str, List[float]]] = {
         "prophet": {"actual": [], "predicted": []},
         "naive": {"actual": [], "predicted": []},
         "historical_avg": {"actual": [], "predicted": []},
     }
 
-    for test_key in TEST_PERIOD_ORDINALS:
+    for test_key in test_ordinals:
         train = series[series["period_ordinal"] < test_key]
         test_row = series[series["period_ordinal"] == test_key]
         if train.empty or test_row.empty:
@@ -179,7 +314,7 @@ def walk_forward_evaluate(
         actual = float(test_row[metric].iloc[0])
         test_ds = test_row["ds"].iloc[0]
 
-        train_prophet_df = train.rename(columns={metric: "y"})
+        train_prophet_df = to_prophet_frame(train, metric)
         model = fit_prophet(train_prophet_df)
         prophet_pred = predict_point(model, test_ds)
 
@@ -215,7 +350,31 @@ def evaluate_all_series(engine) -> pd.DataFrame:
     Programs with fewer than MIN_HISTORY_PERIODS distinct periods are
     skipped (logged, not silently dropped) -- see module docstring."""
     df = load_series(engine)
+
+    # A genuinely empty gold.ml_program_forecast_features (fresh database,
+    # data pipeline not yet run) is a normal state, not an error --
+    # .max() on an empty column is NaN, and int(NaN) raises, so this must
+    # be checked before deriving fold ordinals, not left to fail there.
+    if df.empty:
+        logging.getLogger(__name__).info(
+            "evaluate_all_series: gold.ml_program_forecast_features has no "
+            "rows yet -- returning an empty report. Run the Bronze/Silver/"
+            "Gold pipeline (and dbt/build_ml_features) before evaluating."
+        )
+        return pd.DataFrame(columns=[
+            "program_id", "college_id", "metric",
+            "prophet_mae", "prophet_rmse", "prophet_mape", "prophet_r2",
+            "naive_mae", "historical_avg_mae", "best_baseline_mae",
+            "prophet_beats_best_baseline",
+        ])
+
     rows = []
+
+    # P1.14 fix: derive fold boundaries ONCE from the whole dataset's max
+    # observed period_ordinal, so every program is scored against the
+    # same 3 test points -- not a hardcoded [3, 4, 5] literal that would
+    # silently stop matching once history grows past 6 periods.
+    test_ordinals = derive_test_period_ordinals(int(df["period_ordinal"].max()))
 
     try:
         for program_id in sorted(df["program_id"].unique()):
@@ -229,7 +388,7 @@ def evaluate_all_series(engine) -> pd.DataFrame:
 
             college_id = program_series["college_id"].iloc[0]
             for metric in TARGET_METRICS:
-                fold_results = walk_forward_evaluate(program_series, metric)
+                fold_results = walk_forward_evaluate(program_series, metric, test_ordinals)
 
                 model_metrics = {
                     name: compute_metrics_for_model(r["actual"], r["predicted"])
@@ -277,7 +436,7 @@ def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> L
         if not has_sufficient_history(program_series):
             continue
         for metric in TARGET_METRICS:
-            train_df = program_series.rename(columns={metric: "y"})
+            train_df = to_prophet_frame(program_series, metric)
             model = fit_prophet(train_df)
             path = artifacts_dir / f"{program_id}_{metric}_prophet.pkl"
             with path.open("wb") as f:

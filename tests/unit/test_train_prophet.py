@@ -23,11 +23,12 @@ import pytest
 from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
 from models.forecasting.train_prophet import (
     MIN_HISTORY_PERIODS,
-    TEST_PERIOD_ORDINALS,
     evaluate_all_series,
     fit_prophet,
     has_sufficient_history,
     semester_to_date,
+    test_period_ordinals,
+    to_prophet_frame,
 )
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
@@ -52,8 +53,26 @@ def test_semester_to_date_matches_dim_calendar_convention():
     assert semester_to_date(2024, 2)[:4] == "2024"
 
 
-def test_exactly_three_walk_forward_test_points():
-    assert TEST_PERIOD_ORDINALS == [3, 4, 5]
+def test_period_ordinals_matches_current_six_period_dataset():
+    # Current OBSERVED_ACADEMIC_YEARS = [2021, 2022, 2023] -> 6 periods,
+    # ordinals 0-5 -> this is the exact fold table docs/10_Forecasting.md
+    # Section 5 documents. Same result the old [3, 4, 5] literal gave --
+    # but now derived, not hardcoded.
+    assert test_period_ordinals(5) == [3, 4, 5]
+
+
+def test_period_ordinals_always_returns_three_points():
+    assert len(test_period_ordinals(3)) == 3
+    assert len(test_period_ordinals(10)) == 3
+
+
+def test_period_ordinals_shifts_when_history_grows():
+    # P1.14: this is the case the old hardcoded literal could NOT
+    # handle -- a 5th observed academic year (10 periods, ordinals
+    # 0-9) must shift the fold window forward, not silently keep
+    # testing against stale ordinals 3-5.
+    assert test_period_ordinals(9) == [7, 8, 9]
+    assert test_period_ordinals(9) != test_period_ordinals(5)
 
 
 def test_min_history_periods_covers_fold_one_train_plus_test():
@@ -104,7 +123,7 @@ def test_evaluate_all_series_wraps_evaluation_failures_in_model_evaluation_error
     )
     monkeypatch.setattr(
         "models.forecasting.train_prophet.walk_forward_evaluate",
-        lambda entity_series, metric: (_ for _ in ()).throw(RuntimeError("bad fold")),
+        lambda entity_series, metric, test_ordinals: (_ for _ in ()).throw(RuntimeError("bad fold")),
     )
 
     with pytest.raises(ModelEvaluationError) as exc:
@@ -112,6 +131,110 @@ def test_evaluate_all_series_wraps_evaluation_failures_in_model_evaluation_error
 
     assert exc.value.category.value == "MODEL_EVALUATION_ERROR"
     assert "Walk-forward evaluation failed" in str(exc.value)
+
+
+# --- P1.13: to_prophet_frame adapter tests (no Postgres required) ---
+
+def test_to_prophet_frame_valid_input_produces_ds_y_sorted_by_ds():
+    series = pd.DataFrame({
+        "ds": ["2022-01-01", "2021-01-01", "2021-07-01"],
+        "enrollment_count": [30, 10, 20],
+    })
+    frame = to_prophet_frame(series, "enrollment_count")
+    assert list(frame.columns) == ["ds", "y"]
+    assert list(frame["y"]) == [10, 20, 30]  # sorted by ds, not input order
+    assert pd.api.types.is_datetime64_any_dtype(frame["ds"])
+
+
+def test_to_prophet_frame_missing_ds_column_raises():
+    series = pd.DataFrame({"enrollment_count": [10, 20]})
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "'ds' column missing" in str(exc.value)
+
+
+def test_to_prophet_frame_null_ds_raises():
+    # A literal None/NaN in ds converts to NaT (not a raised exception --
+    # pd.to_datetime(errors="raise") only raises on unparseable strings,
+    # not already-missing values), so this is a distinct code path from
+    # test_to_prophet_frame_unparseable_ds_raises above and needs its own
+    # coverage per P1.11 ("non-null").
+    series = pd.DataFrame({
+        "ds": [None, "2021-07-01"],
+        "enrollment_count": [10, 20],
+    })
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "null ds value" in str(exc.value)
+
+
+def test_to_prophet_frame_missing_metric_column_raises():
+    series = pd.DataFrame({"ds": ["2021-01-01", "2021-07-01"]})
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "not present in series" in str(exc.value)
+
+
+def test_to_prophet_frame_null_y_raises():
+    series = pd.DataFrame({
+        "ds": ["2021-01-01", "2021-07-01"],
+        "enrollment_count": [10, None],
+    })
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "null y value" in str(exc.value)
+
+
+def test_to_prophet_frame_unparseable_ds_raises():
+    series = pd.DataFrame({
+        "ds": ["2021-01-01", "not-a-date"],
+        "enrollment_count": [10, 20],
+    })
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "not convertible to datetime" in str(exc.value)
+
+
+def test_to_prophet_frame_non_numeric_y_raises():
+    series = pd.DataFrame({
+        "ds": ["2021-01-01", "2021-07-01"],
+        "enrollment_count": ["ten", "twenty"],
+    })
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "not numeric" in str(exc.value)
+
+
+def test_to_prophet_frame_negative_y_raises():
+    series = pd.DataFrame({
+        "ds": ["2021-01-01", "2021-07-01"],
+        "enrollment_count": [10, -5],
+    })
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "negative value" in str(exc.value)
+
+
+def test_to_prophet_frame_duplicate_ds_raises():
+    series = pd.DataFrame({
+        "ds": ["2021-01-01", "2021-01-01"],
+        "enrollment_count": [10, 15],
+    })
+    with pytest.raises(ModelTrainingError) as exc:
+        to_prophet_frame(series, "enrollment_count")
+    assert "duplicate ds" in str(exc.value)
+
+
+def test_to_prophet_frame_unsorted_periods_are_sorted_not_rejected():
+    # Unsorted input is a normal case (callers don't always pre-sort) --
+    # the adapter's job is to sort it, not reject it. Only NON-recoverable
+    # contract violations (nulls, dupes, bad dtype) should raise.
+    series = pd.DataFrame({
+        "ds": ["2022-01-01", "2021-01-01"],
+        "graduation_count": [5, 1],
+    })
+    frame = to_prophet_frame(series, "graduation_count")
+    assert list(frame["ds"]) == sorted(frame["ds"])
 
 
 def _postgres_available() -> bool:

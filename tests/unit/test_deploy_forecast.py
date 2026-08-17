@@ -74,14 +74,30 @@ def test_forecast_next_period_passes_through_positive_values():
 # --------------------------------------------------------------------------
 
 def _series_frame() -> pd.DataFrame:
-    """One college x eight observed periods, enough for both TARGET_METRICS."""
+    """One program x eight observed periods, enough for both TARGET_METRICS.
+
+    Program-grain (P1 Data Science Recovery fix / migration 0013):
+    deploy_forecast.py iterates series_df["program_id"], and its adapter
+    call (to_prophet_frame) requires a real 'ds' column -- both were
+    missing from this fixture's old college-grain shape, which predated
+    that migration and was never updated to match. Not stubbed out:
+    to_prophet_frame is cheap and pure, so real validation exercising
+    real fixture data is more honest coverage than mocking it too.
+    """
     rows = []
     for ordinal in range(8):
+        year = 2021 + ordinal // 2
+        semester = 1 if ordinal % 2 == 0 else 2
         rows.append(
             {
+                "program_id": "BSCS",
+                "program_key": 1,
                 "college_id": "COE",
                 "college_key": 1,
                 "period_ordinal": ordinal,
+                "academic_year": year,
+                "semester_number": semester,
+                "ds": deploy_forecast._semester_to_date(year, semester),
                 "enrollment_count": 100 + ordinal,
                 "graduation_count": 5 + ordinal,
             }
@@ -98,7 +114,7 @@ def patched_fit_and_record(monkeypatch):
     monkeypatch.setattr(
         deploy_forecast,
         "record_candidate",
-        lambda engine, college_key, metric, model_version, candidate, training_meta, artifact_path, decision: 999,
+        lambda engine, program_key, metric, model_version, candidate, training_meta, artifact_path, decision, **kw: 999,
     )
     write_calls = []
     monkeypatch.setattr(
@@ -111,7 +127,7 @@ def patched_fit_and_record(monkeypatch):
 
 def _patch_common(monkeypatch, *, retrain: bool, promote: bool):
     monkeypatch.setattr(deploy_forecast, "load_series", lambda engine: _series_frame())
-    monkeypatch.setattr(deploy_forecast, "get_last_trained_period_ordinal", lambda engine, college_key, metric: None)
+    monkeypatch.setattr(deploy_forecast, "get_last_trained_period_ordinal", lambda engine, program_key, metric: None)
     monkeypatch.setattr(
         deploy_forecast,
         "should_retrain",
@@ -120,7 +136,7 @@ def _patch_common(monkeypatch, *, retrain: bool, promote: bool):
     monkeypatch.setattr(
         deploy_forecast,
         "walk_forward_evaluate",
-        lambda college_series, metric: {
+        lambda program_series, metric, test_ordinals: {
             "naive": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},
             "historical_avg": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},
             "prophet": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},
@@ -131,14 +147,14 @@ def _patch_common(monkeypatch, *, retrain: bool, promote: bool):
         "compute_metrics_for_model",
         lambda actual, predicted: {"mae": 1.0, "rmse": 1.0, "mape": 5.0, "r2": 0.9},
     )
-    monkeypatch.setattr(deploy_forecast, "get_current_champion", lambda engine, college_key, metric: None)
+    monkeypatch.setattr(deploy_forecast, "get_current_champion", lambda engine, program_key, metric: None)
     monkeypatch.setattr(
         deploy_forecast,
         "decide_promotion",
         lambda candidate, champion: PromotionDecision(promote=promote, reason="fixture decision"),
     )
     monkeypatch.setattr(
-        deploy_forecast, "make_model_version", lambda college_id, metric: f"{college_id}_{metric}_v1"
+        deploy_forecast, "make_model_version", lambda program_id, metric: f"{program_id}_{metric}_v1"
     )
 
 
@@ -218,4 +234,3 @@ def test_deploy_forecasts_propagates_forecast_error_without_rewrapping(monkeypat
 
     with pytest.raises(ForecastError, match="already classified"):
         deploy_forecast.deploy_forecasts(engine=object(), artifacts_dir=tmp_path)
-        

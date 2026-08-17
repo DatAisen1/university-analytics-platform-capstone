@@ -68,9 +68,11 @@ from models.forecasting.train_prophet import (
     MIN_HISTORY_PERIODS,
     TARGET_METRICS,
     compute_metrics_for_model,
+    derive_test_period_ordinals,
     fit_prophet,
     has_sufficient_history,
     load_series,
+    to_prophet_frame,
     walk_forward_evaluate,
 )
 from pipelines.common.errors import ForecastError
@@ -211,6 +213,16 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
         series_df = load_series(engine)
         results: List[DeploymentResult] = []
 
+        # P1.14 fix: derive walk-forward fold boundaries ONCE from the
+        # whole dataset's max observed period_ordinal (mirrors
+        # train_prophet.evaluate_all_series) instead of letting each
+        # program derive its own from a possibly-shorter series -- a
+        # discontinued program's shorter history must still be evaluated
+        # against the SAME global fold points as every other program
+        # (with unsupported folds skipped, same as before), not against
+        # a different set of folds derived from its own truncated max.
+        test_ordinals = derive_test_period_ordinals(int(series_df["period_ordinal"].max()))
+
         for program_id in sorted(series_df["program_id"].unique()):
             program_series = series_df[series_df["program_id"] == program_id].sort_values("period_ordinal")
             program_key = int(program_series["program_key"].iloc[0])
@@ -250,8 +262,9 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                     )
                     continue
 
-                # Per-series walk-forward evaluation (Day 20 harness, unchanged).
-                fold_results = walk_forward_evaluate(program_series, metric)
+                # Per-series walk-forward evaluation (Day 20 harness, unchanged),
+                # scored against the dataset-wide fold boundaries computed above.
+                fold_results = walk_forward_evaluate(program_series, metric, test_ordinals)
                 model_metrics = {
                     name: compute_metrics_for_model(r["actual"], r["predicted"]) for name, r in fold_results.items()
                 }
@@ -276,7 +289,7 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                 # evaluation-only candidate still needs an artifact on disk
                 # so its walk-forward result is reproducible/inspectable
                 # later, even if it's never deployed.
-                train_df = program_series.rename(columns={metric: "y"})
+                train_df = to_prophet_frame(program_series, metric)
                 model = fit_prophet(train_df)
                 artifact_path = artifacts_dir / f"{model_version}.pkl"
                 with artifact_path.open("wb") as f:
