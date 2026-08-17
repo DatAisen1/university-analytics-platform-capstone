@@ -68,7 +68,7 @@ Train: 2021-2022 S1 → 2023-2024 S1  |  Test: 2023-2024 S2
 Only **3 walk-forward folds** are available under the corrected model (down from the 4 folds a previous, incorrect 8-semester draft used) — a direct, disclosed consequence of the academic-calendar fix. Each fold trains only on data strictly before the test point, then errors are averaged across folds. With this few folds, the evaluation report should treat any per-fold metric as a point estimate with wide, disclosed uncertainty, not a precise accuracy figure.
 
 ### Baseline Comparison (Required, Not Optional)
-Every Prophet forecast is compared against a **naive baseline** (last semester's actual value) and a **historical-average baseline**. If Prophet doesn't outperform these simple baselines on a given series, that's reported honestly rather than hidden.
+Every Prophet forecast is compared against three baselines: a **naive baseline** (last semester's actual value), a **historical-average baseline**, and a **seasonal-naive baseline** (the same semester one academic year prior — e.g. this Fall's forecast compared against last Fall's actual value, not last Spring's). The seasonal-naive baseline is only computed for a walk-forward fold where that prior-season period actually exists in the training window; where it's unavailable (a series without a full prior seasonal cycle in its training data), the comparison falls back to naive/historical-average only for that series — this is disclosed in the evaluation report as `n/a`, not silently substituted. Prophet must beat the best of whichever baselines are available on a given series; if it doesn't, that's reported honestly rather than hidden.
 
 ## 5.1 Implementation Notes and Real Results
 

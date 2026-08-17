@@ -27,7 +27,7 @@ from models.forecasting.train_prophet import (
     fit_prophet,
     has_sufficient_history,
     semester_to_date,
-    test_period_ordinals,
+    derive_test_period_ordinals,
     to_prophet_frame,
 )
 TEST_ENV = {
@@ -58,12 +58,12 @@ def test_period_ordinals_matches_current_six_period_dataset():
     # ordinals 0-5 -> this is the exact fold table docs/10_Forecasting.md
     # Section 5 documents. Same result the old [3, 4, 5] literal gave --
     # but now derived, not hardcoded.
-    assert test_period_ordinals(5) == [3, 4, 5]
+    assert derive_test_period_ordinals(5) == [3, 4, 5]
 
 
 def test_period_ordinals_always_returns_three_points():
-    assert len(test_period_ordinals(3)) == 3
-    assert len(test_period_ordinals(10)) == 3
+    assert len(derive_test_period_ordinals(3)) == 3
+    assert len(derive_test_period_ordinals(10)) == 3
 
 
 def test_period_ordinals_shifts_when_history_grows():
@@ -71,8 +71,8 @@ def test_period_ordinals_shifts_when_history_grows():
     # handle -- a 5th observed academic year (10 periods, ordinals
     # 0-9) must shift the fold window forward, not silently keep
     # testing against stale ordinals 3-5.
-    assert test_period_ordinals(9) == [7, 8, 9]
-    assert test_period_ordinals(9) != test_period_ordinals(5)
+    assert derive_test_period_ordinals(9) == [7, 8, 9]
+    assert derive_test_period_ordinals(9) != derive_test_period_ordinals(5)
 
 
 def test_min_history_periods_covers_fold_one_train_plus_test():
@@ -315,4 +315,4 @@ def test_write_evaluation_report_produces_both_csv_and_markdown(evaluation_repor
     csv_path, md_path = write_evaluation_report(evaluation_report, artifacts_dir=tmp_path)
     assert csv_path.exists()
     assert md_path.exists()
-    assert "Prophet beats the best baseline" in md_path.read_text()
+    assert "Prophet beats the best baseline" in md_path.read_text(encoding="utf-8")
