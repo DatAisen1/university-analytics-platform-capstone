@@ -39,6 +39,14 @@ gold.model_registry / gold.fact_forecast were migrated to match
 (migrations/versions/0013_forecast_program_grain.py): program_key is
 the grain key, college_key is kept only as a denormalized convenience
 column sourced from dim_program at write time.
+
+P1 (Forecast Output Contract) fix: every TrainingMetadata built here now
+carries dataset_fingerprint (migrations/versions/0014_dataset_fingerprint.py)
+-- one fingerprint per deploy_forecasts() run, computed once from the
+load_series() pull and reused across every candidate that run trains, so
+a forecast row (joined via model_registry_key) can be traced back to the
+exact dataset snapshot that produced it, not just the training window it
+covered.
 """
 
 from __future__ import annotations
@@ -76,6 +84,7 @@ from models.forecasting.train_prophet import (
     walk_forward_evaluate,
 )
 from pipelines.common.errors import ForecastError
+from pipelines.gold.build_ml_features import feature_dataset_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +222,20 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
         series_df = load_series(engine)
         results: List[DeploymentResult] = []
 
+        # P1 (Forecast Output Contract, dataset_fingerprint): ONE fingerprint
+        # for the whole load_series() pull, computed ONCE and reused for
+        # every candidate trained in this run -- not per-program -- because
+        # every candidate this run trains genuinely was trained against
+        # the same query result. Reuses build_ml_features' own hashing
+        # function for a consistent method, but is computed over the
+        # (program_key, period_ordinal, target metrics, ...) columns
+        # load_series() actually selects, not the full lag/rolling feature
+        # set gold.ml_program_forecast_features carries -- this fingerprint
+        # answers "which load_series() snapshot trained this candidate",
+        # not "which full feature-table build" (that already has its own
+        # fingerprint, logged in the Dagster asset that builds the table).
+        dataset_fingerprint = feature_dataset_fingerprint(series_df) if not series_df.empty else "empty"
+
         # P1.14 fix: derive walk-forward fold boundaries ONCE from the
         # whole dataset's max observed period_ordinal (mirrors
         # train_prophet.evaluate_all_series) instead of letting each
@@ -297,6 +320,7 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
 
                 training_meta = TrainingMetadata(
                     algorithm=_ALGORITHM,
+                    dataset_fingerprint=dataset_fingerprint,
                     training_data_start_period_ordinal=current_min_period_ordinal,
                     training_data_end_period_ordinal=current_max_period_ordinal,
                     training_record_count=len(train_df),

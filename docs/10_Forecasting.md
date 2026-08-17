@@ -70,6 +70,14 @@ Only **3 walk-forward folds** are available under the corrected model (down from
 ### Baseline Comparison (Required, Not Optional)
 Every Prophet forecast is compared against three baselines: a **naive baseline** (last semester's actual value), a **historical-average baseline**, and a **seasonal-naive baseline** (the same semester one academic year prior — e.g. this Fall's forecast compared against last Fall's actual value, not last Spring's). The seasonal-naive baseline is only computed for a walk-forward fold where that prior-season period actually exists in the training window; where it's unavailable (a series without a full prior seasonal cycle in its training data), the comparison falls back to naive/historical-average only for that series — this is disclosed in the evaluation report as `n/a`, not silently substituted. Prophet must beat the best of whichever baselines are available on a given series; if it doesn't, that's reported honestly rather than hidden.
 
+**P1.24: the comparison is a structured value, not just prose.** Both `models/forecasting/train_prophet.py::evaluate_all_series` (the `mae_diff` column, `Diff (Prophet - Baseline)` in `evaluation_report.md`) and `models/forecasting/model_registry.py::decide_promotion` (`PromotionDecision.baseline_mae` / `.candidate_mae` / `.mae_diff`) report the best-baseline MAE, the Prophet/candidate MAE, and their signed difference (`candidate - baseline`; negative means Prophet won) explicitly, rather than requiring a reader to subtract two numbers out of a sentence.
+
+### Model Acceptance Criteria (P1.23–P1.25)
+A model is never accepted merely because Prophet trained and produced output — `decide_promotion` never checks "did fitting succeed," only forecasting performance:
+1. **Selection rule (P1.23):** the candidate must beat the best available baseline on walk-forward MAE (lower is better) — that's the sole criterion for a series with no existing champion. Where a champion already exists, the candidate must also match or beat the champion's MAE.
+2. **Baseline comparison (P1.24):** every decision — promoted or rejected — carries the baseline metric, the candidate metric, and their difference as explicit fields (see above), so any rejection is auditable without re-deriving the numbers.
+3. **Minimum acceptable performance (P1.25):** "runs without error" is not an acceptance criterion anywhere in this pipeline — a candidate that trains successfully but doesn't beat its baseline is recorded (for audit trail) and explicitly rejected, never promoted.
+
 ## 5.1 Implementation Notes and Real Results
 
 > **⚠️ STALE — pending regeneration.** The prior version of this section reported real evaluation results (e.g., "Prophet beats the best baseline on 8 of 16 series," a metric-level 100%/0% split by `enrollment_count` vs. `graduation_count`) measured against the old, incorrect 8-semester dataset with 4 walk-forward folds, at COLLEGE grain. **P1 (Data Science Recovery) additionally moved the forecast grain from `(college, metric)` to `(program, metric)`** — `train_prophet.load_series()` now reads `gold.ml_program_forecast_features` (the dedicated, leakage-safe forecast dataset built for this exact purpose, previously unused) instead of querying `gold.fact_institution_kpi` directly. Series count is now `~37 programs × 2 metrics`, not `8 colleges × 2 metrics`, and programs with fewer than 4 distinct observed periods (`MIN_HISTORY_PERIODS`) are skipped rather than crashing Prophet on too little data — both real result sets (college-grain and program-grain) must be re-produced from a live run before this section can be un-flagged; the underlying finding about graduation-count series remaining hard to beat is *expected* to still apply, but is not re-verified here.
@@ -83,6 +91,24 @@ Every Prophet forecast is compared against three baselines: a **naive baseline**
 ## 6. Forecast Output
 
 Predictions (with 80% confidence interval bounds from Prophet) are written to `gold.fact_forecast`, tagged with `model_version`, so historical forecasts remain queryable and comparable against what actually happened once real data arrives for that semester — enabling a "forecast accuracy over time" mart the Web Team can build a view on top of. `program_key` is the grain key (migration `0013_forecast_program_grain.py`); `college_key` is kept as a denormalized, nullable convenience column for college-level rollups without a join.
+
+### Forecast Output Contract (P1)
+
+Every row in `gold.fact_forecast` carries the required contract fields directly:
+
+- **future academic period** — `target_academic_year`, `target_semester_number`, `target_period_ordinal`
+- **prediction** — `yhat`
+- **lower bound** — `yhat_lower`
+- **upper bound** — `yhat_upper`
+- **model version** — `model_version` (denormalized so a `fact_forecast`-only query doesn't need a join)
+
+The recommended metadata is a join away, on `gold.model_registry` via `model_registry_key` — matching the project's own denormalization convention (only fields needed for join-free queries are duplicated onto the fact table):
+
+- `forecast_created_at` → `fact_forecast.generated_at` (on the fact table itself)
+- `training_data_start` / `training_data_end` → `model_registry.training_data_start_period_ordinal` / `training_data_end_period_ordinal`
+- `model_type` → `model_registry.algorithm`
+- `evaluation_metric` → `model_registry.mae` / `.rmse` / `.mape` / `.r2`
+- `dataset_fingerprint` (migration `0014_dataset_fingerprint.py`) → `model_registry.dataset_fingerprint`, the `pipelines.gold.build_ml_features.feature_dataset_fingerprint()` value for the `train_prophet.load_series()` pull that trained the candidate. Computed **once per `deploy_forecasts()` run** and reused across every candidate that run trains (all of them read the same query result) — it identifies "which data snapshot trained this candidate," not "which full `gold.ml_program_forecast_features` build" (that table's own build-time fingerprint is logged separately, in the Dagster asset that constructs it, since `load_series()` only selects a subset of its columns).
 
 ---
 *Next: `11_Data_Consumption_Contract.md` — the published interface between this service and the Web Team.*

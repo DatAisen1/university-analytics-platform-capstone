@@ -234,3 +234,55 @@ def test_deploy_forecasts_propagates_forecast_error_without_rewrapping(monkeypat
 
     with pytest.raises(ForecastError, match="already classified"):
         deploy_forecast.deploy_forecasts(engine=object(), artifacts_dir=tmp_path)
+
+
+# --------------------------------------------------------------------------
+# P1 (Forecast Output Contract): dataset_fingerprint provenance
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def patched_fit_and_record_capturing_training_meta(monkeypatch):
+    """Same as patched_fit_and_record, but keeps the actual TrainingMetadata
+    passed to record_candidate for each call, instead of discarding it --
+    needed to assert on dataset_fingerprint specifically."""
+    monkeypatch.setattr(deploy_forecast, "fit_prophet", lambda train_df: _FakeModel(50.0, 40.0, 60.0))
+    training_meta_calls = []
+
+    def _fake_record_candidate(engine, program_key, metric, model_version, candidate, training_meta, artifact_path, decision, **kw):
+        training_meta_calls.append(training_meta)
+        return 999
+
+    monkeypatch.setattr(deploy_forecast, "record_candidate", _fake_record_candidate)
+    monkeypatch.setattr(deploy_forecast, "_write_forecast_row", lambda engine, **kwargs: None)
+    return training_meta_calls
+
+
+def test_deploy_forecasts_populates_dataset_fingerprint_on_every_candidate(
+    monkeypatch, patched_fit_and_record_capturing_training_meta, tmp_path
+):
+    _patch_common(monkeypatch, retrain=True, promote=True)
+
+    deploy_forecast.deploy_forecasts(engine=object(), artifacts_dir=tmp_path)
+
+    training_meta_calls = patched_fit_and_record_capturing_training_meta
+    # one candidate per (program, metric) -- _series_frame() has one
+    # program and models.forecasting.train_prophet.TARGET_METRICS has 2
+    assert len(training_meta_calls) == 2
+    for meta in training_meta_calls:
+        assert meta.dataset_fingerprint
+        assert isinstance(meta.dataset_fingerprint, str)
+
+
+def test_deploy_forecasts_reuses_the_same_dataset_fingerprint_across_candidates_in_one_run(
+    monkeypatch, patched_fit_and_record_capturing_training_meta, tmp_path
+):
+    """Every candidate trained in the SAME deploy_forecasts() call read the
+    same load_series() pull, so they must all be stamped with the same
+    fingerprint -- computed once, not recomputed (and potentially drifting)
+    per series."""
+    _patch_common(monkeypatch, retrain=True, promote=True)
+
+    deploy_forecast.deploy_forecasts(engine=object(), artifacts_dir=tmp_path)
+
+    fingerprints = {meta.dataset_fingerprint for meta in patched_fit_and_record_capturing_training_meta}
+    assert len(fingerprints) == 1

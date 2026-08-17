@@ -395,7 +395,7 @@ def evaluate_all_series(engine) -> pd.DataFrame:
             "program_id", "college_id", "metric",
             "prophet_mae", "prophet_rmse", "prophet_mape", "prophet_r2",
             "naive_mae", "historical_avg_mae", "seasonal_naive_mae",
-            "best_baseline_mae", "prophet_beats_best_baseline",
+            "best_baseline_mae", "mae_diff", "prophet_beats_best_baseline",
         ])
 
     rows = []
@@ -443,13 +443,19 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                 if not pd.isna(seasonal_naive_mae):
                     candidate_baseline_maes.append(seasonal_naive_mae)
                 best_baseline_mae = min(candidate_baseline_maes)
-                beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
+                prophet_mae = model_metrics["prophet"]["mae"]
+                beats_baseline = prophet_mae < best_baseline_mae
+                # P1.24: baseline metric, Prophet metric, and their
+                # difference all reported explicitly (not left for a
+                # reader to subtract) -- negative means Prophet beat
+                # the baseline by that many MAE units.
+                mae_diff = prophet_mae - best_baseline_mae
 
                 rows.append({
                     "program_id": program_id,
                     "college_id": college_id,
                     "metric": metric,
-                    "prophet_mae": model_metrics["prophet"]["mae"],
+                    "prophet_mae": prophet_mae,
                     "prophet_rmse": model_metrics["prophet"]["rmse"],
                     "prophet_mape": model_metrics["prophet"]["mape"],
                     "prophet_r2": model_metrics["prophet"]["r2"],
@@ -457,6 +463,7 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                     "historical_avg_mae": model_metrics["historical_avg"]["mae"],
                     "seasonal_naive_mae": seasonal_naive_mae,
                     "best_baseline_mae": best_baseline_mae,
+                    "mae_diff": mae_diff,
                     "prophet_beats_best_baseline": beats_baseline,
                 })
 
@@ -516,8 +523,9 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         f"Prophet beats the best baseline on **{beats_count} of {total}** series "
         f"({pct_display}).",
         "",
-        "| Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | Prophet R\u00b2 | Beats Baseline? |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | "
+        "Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R\u00b2 | Beats Baseline? |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for _, row in report_df.iterrows():
         flag = "\u2705" if row["prophet_beats_best_baseline"] else "\u26a0\ufe0f NO"
@@ -527,9 +535,13 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         seasonal_display = (
             "n/a" if pd.isna(row["seasonal_naive_mae"]) else f"{row['seasonal_naive_mae']:.2f}"
         )
+        # P1.24: explicit signed difference alongside the two metrics it
+        # was computed from, so acceptance/rejection is traceable from
+        # the table itself, not just the boolean flag.
         lines.append(
             f"| {row['program_id']} | {row['college_id']} | {row['metric']} | {row['prophet_mae']:.2f} | "
             f"{row['naive_mae']:.2f} | {row['historical_avg_mae']:.2f} | {seasonal_display} | "
+            f"{row['best_baseline_mae']:.2f} | {row['mae_diff']:+.2f} | "
             f"{row['prophet_r2']:.3f} | {flag} |"
         )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

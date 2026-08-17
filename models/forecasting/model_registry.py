@@ -66,9 +66,17 @@ class TrainingMetadata:
     call to record_candidate() -- Task 41's "which model generated this
     forecast?" is only answerable if this is captured at training time,
     not reconstructed later.
+
+    dataset_fingerprint (P1, Forecast Output Contract): the
+    pipelines.gold.build_ml_features.feature_dataset_fingerprint()
+    value for the exact gold.ml_program_forecast_features snapshot this
+    candidate was trained against. Required for the same reason the
+    other three fields are -- reconstructing "which dataset version"
+    after the fact isn't possible once the table has moved on.
     """
 
     algorithm: str
+    dataset_fingerprint: str
     training_data_start_period_ordinal: int
     training_data_end_period_ordinal: int
     training_record_count: int
@@ -99,6 +107,7 @@ class ModelRecord:
     metric: str
     model_version: str
     algorithm: Optional[str]
+    dataset_fingerprint: Optional[str]
     trained_at: datetime
     training_data_start_period_ordinal: Optional[int]
     training_data_end_period_ordinal: Optional[int]
@@ -119,6 +128,20 @@ class ModelRecord:
 class PromotionDecision:
     promote: bool
     reason: str
+    # P1.24: baseline metric, Prophet (candidate) metric, and their
+    # difference as structured fields -- not just prose buried in
+    # `reason` -- so a caller (report, dashboard, audit query) can
+    # consume the comparison without parsing a sentence.
+    # mae_diff = candidate_mae - baseline_mae: negative means the
+    # candidate beat the baseline by that many MAE units, positive
+    # means it lost by that much. Defaulted to 0.0 (not left required)
+    # so existing call sites that construct a PromotionDecision
+    # directly for fixtures/mocking (e.g. tests/unit/test_deploy_forecast.py)
+    # don't break -- decide_promotion() itself always fills these in
+    # explicitly on every branch, defaults are only a fallback.
+    baseline_mae: float = 0.0
+    candidate_mae: float = 0.0
+    mae_diff: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -218,10 +241,10 @@ def record_candidate(
                     INSERT INTO gold.model_registry (
                         program_key, college_key, metric, model_version, mae, rmse, mape, r2,
                         best_baseline_mae, beats_baseline, is_champion, rejected_reason,
-                        artifact_path, algorithm, training_data_start_period_ordinal,
+                        artifact_path, algorithm, dataset_fingerprint, training_data_start_period_ordinal,
                         training_data_end_period_ordinal, training_record_count
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING model_registry_key
                     """,
                     (
@@ -239,6 +262,7 @@ def record_candidate(
                         None if decision.promote else decision.reason,
                         artifact_path,
                         training_meta.algorithm,
+                        training_meta.dataset_fingerprint,
                         training_meta.training_data_start_period_ordinal,
                         training_meta.training_data_end_period_ordinal,
                         training_meta.training_record_count,
@@ -257,14 +281,24 @@ def record_candidate(
 
 
 def decide_promotion(candidate: CandidateMetrics, champion: Optional[ChampionRecord]) -> PromotionDecision:
-    """Pure promotion rule -- see module docstring for the two criteria."""
+    """Pure promotion rule -- see module docstring for the two criteria.
+
+    P1.24: every return path fills baseline_mae/candidate_mae/mae_diff,
+    so the baseline-vs-candidate comparison is always available as
+    structured data, regardless of which branch decided the outcome.
+    """
+    mae_diff = candidate.mae - candidate.best_baseline_mae
+
     if not candidate.beats_baseline:
         return PromotionDecision(
             promote=False,
             reason=(
                 f"candidate MAE {candidate.mae:.4f} does not beat the best baseline "
-                f"MAE {candidate.best_baseline_mae:.4f}"
+                f"MAE {candidate.best_baseline_mae:.4f} (diff {mae_diff:+.4f})"
             ),
+            baseline_mae=candidate.best_baseline_mae,
+            candidate_mae=candidate.mae,
+            mae_diff=mae_diff,
         )
 
     if champion is not None and candidate.mae > champion.mae:
@@ -272,16 +306,35 @@ def decide_promotion(candidate: CandidateMetrics, champion: Optional[ChampionRec
             promote=False,
             reason=(
                 f"candidate MAE {candidate.mae:.4f} is worse than current champion "
-                f"{champion.model_version} (MAE {champion.mae:.4f})"
+                f"{champion.model_version} (MAE {champion.mae:.4f}); "
+                f"still beat baseline MAE {candidate.best_baseline_mae:.4f} (diff {mae_diff:+.4f})"
             ),
+            baseline_mae=candidate.best_baseline_mae,
+            candidate_mae=candidate.mae,
+            mae_diff=mae_diff,
         )
 
     if champion is None:
-        return PromotionDecision(promote=True, reason="beats baseline; no existing champion (bootstrap)")
+        return PromotionDecision(
+            promote=True,
+            reason=(
+                f"beats baseline MAE {candidate.best_baseline_mae:.4f} with candidate MAE "
+                f"{candidate.mae:.4f} (diff {mae_diff:+.4f}); no existing champion (bootstrap)"
+            ),
+            baseline_mae=candidate.best_baseline_mae,
+            candidate_mae=candidate.mae,
+            mae_diff=mae_diff,
+        )
     return PromotionDecision(
         promote=True,
-        reason=f"beats baseline and improves on champion {champion.model_version} "
-        f"(candidate MAE {candidate.mae:.4f} <= champion MAE {champion.mae:.4f})",
+        reason=(
+            f"beats baseline MAE {candidate.best_baseline_mae:.4f} with candidate MAE "
+            f"{candidate.mae:.4f} (diff {mae_diff:+.4f}) and improves on champion "
+            f"{champion.model_version} (MAE {champion.mae:.4f})"
+        ),
+        baseline_mae=candidate.best_baseline_mae,
+        candidate_mae=candidate.mae,
+        mae_diff=mae_diff,
     )
 
 

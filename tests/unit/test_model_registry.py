@@ -79,6 +79,39 @@ def test_promotes_on_tie_with_champion():
     assert decision.promote is True
 
 
+# --- P1.24: baseline metric / candidate metric / difference are
+# structured fields on every PromotionDecision, not just prose in
+# `reason` -- checked across all four decide_promotion branches. ---
+
+def test_promotion_decision_reports_baseline_candidate_and_diff_when_promoted():
+    decision = decide_promotion(_candidate(mae=10.0, best_baseline_mae=100.0), champion=None)
+    assert decision.baseline_mae == 100.0
+    assert decision.candidate_mae == 10.0
+    assert decision.mae_diff == pytest.approx(-90.0)  # candidate beat baseline by 90 MAE units
+
+
+def test_promotion_decision_reports_diff_when_rejected_for_failing_baseline():
+    decision = decide_promotion(_candidate(mae=150.0, beats_baseline=False, best_baseline_mae=100.0), champion=None)
+    assert decision.baseline_mae == 100.0
+    assert decision.candidate_mae == 150.0
+    assert decision.mae_diff == pytest.approx(50.0)  # candidate worse than baseline by 50 units
+
+
+def test_promotion_decision_reports_diff_when_rejected_for_losing_to_champion():
+    champ = _champion(mae=5.0)
+    decision = decide_promotion(_candidate(mae=15.0, best_baseline_mae=100.0), champion=champ)
+    # Rejected on the champion criterion, but the baseline comparison
+    # (criterion 1, which it passed) must still be reported, not omitted.
+    assert decision.baseline_mae == 100.0
+    assert decision.candidate_mae == 15.0
+    assert decision.mae_diff == pytest.approx(-85.0)
+
+
+def test_promotion_decision_diff_is_zero_on_exact_baseline_match():
+    decision = decide_promotion(_candidate(mae=100.0, best_baseline_mae=100.0), champion=None)
+    assert decision.mae_diff == pytest.approx(0.0)
+
+
 def test_make_model_version_is_deterministic_and_readable():
     ts = datetime(2026, 8, 2, 14, 5, 1, tzinfo=timezone.utc)
     version = make_model_version("CICT", "enrollment_count", trained_at=ts)
