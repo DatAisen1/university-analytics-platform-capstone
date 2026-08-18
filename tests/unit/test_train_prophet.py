@@ -16,6 +16,8 @@ this task's execution report for what still needs a real run to confirm.
 """
 
 import os
+import pickle
+import sys
 
 import pandas as pd
 import pytest
@@ -26,6 +28,8 @@ from models.forecasting.train_prophet import (
     evaluate_all_series,
     fit_prophet,
     has_sufficient_history,
+    load_model,
+    predict_point,
     semester_to_date,
     derive_test_period_ordinals,
     to_prophet_frame,
@@ -38,6 +42,33 @@ TEST_ENV = {
     "POSTGRES_PASSWORD": os.environ.get("TEST_POSTGRES_PASSWORD", "local_dev_password"),
 }
 PIPELINE_WRITER_PASSWORD = os.environ.get("TEST_PIPELINE_WRITER_PASSWORD", "pw_pipeline123")
+
+
+class _FakeProphet:
+    """Deterministic stand-in for prophet.Prophet -- same
+    monkeypatch-the-`prophet`-module technique already used below by
+    test_fit_prophet_wraps_training_failures_in_model_training_error,
+    extended with a fit/predict that actually works (not just raises),
+    so the P2.2/P2.3 tests below can exercise a real save -> load ->
+    predict round trip without pulling in the heavy real dependency.
+    Prediction is a plain function of the training data, so a bug in
+    the save/load path would surface as a MISMATCHED yhat, not just a
+    pickling exception.
+    """
+
+    def fit(self, train_df):
+        self._mean_y = float(train_df["y"].mean())
+        return self
+
+    def predict(self, future_df):
+        return pd.DataFrame(
+            {
+                "ds": future_df["ds"],
+                "yhat": [self._mean_y] * len(future_df),
+                "yhat_lower": [self._mean_y - 1.0] * len(future_df),
+                "yhat_upper": [self._mean_y + 1.0] * len(future_df),
+            }
+        )
 
 
 def test_semester_to_date_semester_1_is_january():
@@ -237,6 +268,61 @@ def test_to_prophet_frame_unsorted_periods_are_sorted_not_rejected():
     assert list(frame["ds"]) == sorted(frame["ds"])
 
 
+# --- P2.2/P2.3 (MLOps Simplification): artifact retrieval + forecast
+# reproducibility. No Postgres or real prophet dependency required -- see
+# _FakeProphet above. ---
+
+def test_load_model_round_trips_a_saved_artifact(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    train_df = pd.DataFrame({"ds": ["2021-01-01", "2021-07-01"], "y": [10.0, 20.0]})
+    model = fit_prophet(train_df)
+
+    artifact_path = tmp_path / "test_model.pkl"
+    with artifact_path.open("wb") as f:
+        pickle.dump(model, f)
+
+    loaded = load_model(artifact_path)
+
+    # The loaded model must be usable for prediction, not just
+    # unpickle-without-erroring -- P2.2 asks whether a trained model
+    # "can be retrieved", i.e. retrieved AND used, not merely stored.
+    assert predict_point(loaded, "2022-01-01") == predict_point(model, "2022-01-01")
+
+
+def test_load_model_missing_artifact_raises_clear_error(tmp_path):
+    missing_path = tmp_path / "does_not_exist.pkl"
+    with pytest.raises(FileNotFoundError, match="Model artifact not found"):
+        load_model(missing_path)
+
+
+def test_saved_model_predictions_are_reproducible_across_loads(tmp_path, monkeypatch):
+    """P2.3: for a FIXED model_version (i.e. a specific artifact already
+    on disk), loading it and forecasting the same target period twice
+    must produce equivalent results within tolerance. This is
+    inference-time determinism -- reading the same bytes back should
+    never silently change what the model predicts -- not a claim that
+    retraining Prophet from scratch on the same data converges to
+    bit-identical parameters (Prophet's optimizer isn't guaranteed to be
+    exactly reproducible across runs/environments, so that's a separate,
+    much weaker guarantee this test does not make)."""
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    train_df = pd.DataFrame(
+        {"ds": ["2021-01-01", "2021-07-01", "2022-01-01"], "y": [10.0, 12.0, 14.0]}
+    )
+    model = fit_prophet(train_df)
+    artifact_path = tmp_path / "reproducibility_model.pkl"
+    with artifact_path.open("wb") as f:
+        pickle.dump(model, f)
+
+    first_load = load_model(artifact_path)
+    second_load = load_model(artifact_path)
+
+    first_yhat = predict_point(first_load, "2022-07-01")
+    second_yhat = predict_point(second_load, "2022-07-01")
+
+    assert first_yhat == pytest.approx(second_yhat, abs=1e-9)
+
+
 def _postgres_available() -> bool:
     from pipelines.common.postgres import get_admin_connection
     try:
@@ -247,72 +333,71 @@ def _postgres_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(not _postgres_available(), reason="Requires a reachable Postgres instance")
+# Scoped to THIS class only, not the module -- a bare module-level
+# `pytestmark = pytest.mark.skipif(...)` silently applies to every test
+# in the file regardless of where it's defined (Python builds the whole
+# module, including this line, before pytest ever looks at it), which
+# was previously skipping every no-Postgres-required test above too
+# whenever Postgres wasn't reachable. Class-scoping keeps the skip
+# confined to the tests that actually need a live database.
+@pytest.mark.skipif(not _postgres_available(), reason="Requires a reachable Postgres instance")
+class TestPostgresIntegration:
+    @pytest.fixture(scope="class")
+    def engine(self):
+        from sqlalchemy import create_engine
+        return create_engine(
+            f"postgresql+psycopg2://pipeline_writer:{PIPELINE_WRITER_PASSWORD}@"
+            f"{TEST_ENV['POSTGRES_HOST']}:{TEST_ENV['POSTGRES_PORT']}/{TEST_ENV['POSTGRES_DB']}"
+        )
 
+    @pytest.fixture(scope="class")
+    def evaluation_report(self, engine):
+        from models.forecasting.train_prophet import evaluate_all_series
+        return evaluate_all_series(engine)
 
-@pytest.fixture(scope="module")
-def engine():
-    from sqlalchemy import create_engine
-    return create_engine(
-        f"postgresql+psycopg2://pipeline_writer:{PIPELINE_WRITER_PASSWORD}@"
-        f"{TEST_ENV['POSTGRES_HOST']}:{TEST_ENV['POSTGRES_PORT']}/{TEST_ENV['POSTGRES_DB']}"
-    )
+    @pytest.fixture(scope="class")
+    def program_count(self, engine):
+        """Actual gold.dim_program row count -- P1 fix asserts against this
+        instead of a hardcoded number, since program count is a config
+        value (configs/programs.yaml), not a project constant like the
+        8 colleges were."""
+        conn = engine.raw_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM gold.dim_program")
+                return cur.fetchone()[0]
+        finally:
+            conn.close()
 
+    def test_evaluation_report_has_at_most_one_row_per_program_per_metric(self, evaluation_report, program_count):
+        # <=, not ==: programs below MIN_HISTORY_PERIODS are legitimately
+        # skipped (see has_sufficient_history), so this is an upper bound,
+        # not an exact-count assertion.
+        assert len(evaluation_report) <= program_count * 2
 
-@pytest.fixture(scope="module")
-def evaluation_report(engine):
-    from models.forecasting.train_prophet import evaluate_all_series
-    return evaluate_all_series(engine)
+    def test_evaluation_report_flags_series_where_prophet_does_not_beat_baseline(self, evaluation_report):
+        assert "prophet_beats_best_baseline" in evaluation_report.columns
+        assert set(evaluation_report["prophet_beats_best_baseline"].unique()) <= {True, False}
 
+    def test_prophet_evaluation_report_has_program_and_college_columns(self, evaluation_report):
+        # P1 fix: series are (program, metric) now, but college_id is still
+        # carried through (denormalized) so results remain rollup-able.
+        assert {"program_id", "college_id", "metric"} <= set(evaluation_report.columns)
 
-@pytest.fixture(scope="module")
-def program_count(engine):
-    """Actual gold.dim_program row count -- P1 fix asserts against this
-    instead of a hardcoded number, since program count is a config
-    value (configs/programs.yaml), not a project constant like the
-    8 colleges were."""
-    conn = engine.raw_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM gold.dim_program")
-            return cur.fetchone()[0]
-    finally:
-        conn.close()
+    def test_train_final_models_saves_one_artifact_per_evaluated_series(self, engine, tmp_path, evaluation_report):
+        from pathlib import Path
+        from models.forecasting.train_prophet import train_final_models
 
+        paths = train_final_models(engine, artifacts_dir=tmp_path)
+        # <=, not ==, for the same has_sufficient_history reason as above.
+        assert len(paths) <= len(evaluation_report)
+        for p in paths:
+            assert Path(p).exists()
 
-def test_evaluation_report_has_at_most_one_row_per_program_per_metric(evaluation_report, program_count):
-    # <=, not ==: programs below MIN_HISTORY_PERIODS are legitimately
-    # skipped (see has_sufficient_history), so this is an upper bound,
-    # not an exact-count assertion.
-    assert len(evaluation_report) <= program_count * 2
+    def test_write_evaluation_report_produces_both_csv_and_markdown(self, evaluation_report, tmp_path):
+        from models.forecasting.train_prophet import write_evaluation_report
 
-
-def test_evaluation_report_flags_series_where_prophet_does_not_beat_baseline(evaluation_report):
-    assert "prophet_beats_best_baseline" in evaluation_report.columns
-    assert set(evaluation_report["prophet_beats_best_baseline"].unique()) <= {True, False}
-
-
-def test_prophet_evaluation_report_has_program_and_college_columns(evaluation_report):
-    # P1 fix: series are (program, metric) now, but college_id is still
-    # carried through (denormalized) so results remain rollup-able.
-    assert {"program_id", "college_id", "metric"} <= set(evaluation_report.columns)
-
-
-def test_train_final_models_saves_one_artifact_per_evaluated_series(engine, tmp_path, evaluation_report):
-    from pathlib import Path
-    from models.forecasting.train_prophet import train_final_models
-
-    paths = train_final_models(engine, artifacts_dir=tmp_path)
-    # <=, not ==, for the same has_sufficient_history reason as above.
-    assert len(paths) <= len(evaluation_report)
-    for p in paths:
-        assert Path(p).exists()
-
-
-def test_write_evaluation_report_produces_both_csv_and_markdown(evaluation_report, tmp_path):
-    from models.forecasting.train_prophet import write_evaluation_report
-
-    csv_path, md_path = write_evaluation_report(evaluation_report, artifacts_dir=tmp_path)
-    assert csv_path.exists()
-    assert md_path.exists()
-    assert "Prophet beats the best baseline" in md_path.read_text(encoding="utf-8")
+        csv_path, md_path = write_evaluation_report(evaluation_report, artifacts_dir=tmp_path)
+        assert csv_path.exists()
+        assert md_path.exists()
+        assert "Prophet beats the best baseline" in md_path.read_text(encoding="utf-8")

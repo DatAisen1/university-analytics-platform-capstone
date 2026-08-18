@@ -285,6 +285,25 @@ def predict_point(model, ds: str) -> float:
     return float(forecast["yhat"].iloc[0])
 
 
+def load_model(artifact_path: Path):
+    """Load a pickled model previously written by one of this package's
+    save sites (train_final_models below, models.forecasting.deploy_forecast
+    .deploy_forecasts). The counterpart to every `pickle.dump(model, f)`
+    call in this project -- without it, gold.model_registry.artifact_path
+    recorded a path nothing ever read back, and "can a trained model
+    actually be retrieved" (P2.2, MLOps Simplification) was unverified.
+
+    Raises FileNotFoundError with a clearer message than the raw
+    pickle/OS error if the artifact is missing, e.g. artifacts_dir wasn't
+    persisted or mounted where the caller expected.
+    """
+    artifact_path = Path(artifact_path)
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Model artifact not found at {artifact_path}")
+    with artifact_path.open("rb") as f:
+        return pickle.load(f)
+
+
 def walk_forward_evaluate(
     entity_series: pd.DataFrame, metric: str, test_ordinals: Optional[List[int]] = None
 ) -> Dict[str, Dict[str, List[float]]]:
