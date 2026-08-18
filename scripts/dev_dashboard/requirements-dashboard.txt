@@ -1,0 +1,19 @@
+# scripts/dev_dashboard/requirements-dashboard.txt
+#
+# Pinned to streamlit>=1.55.0 specifically: that's the first release whose
+# protobuf constraint (>=3.20,<8) overlaps dbt-core 1.12.0's
+# (protobuf>=6.0,<8.0). Earlier Streamlit releases (e.g. 1.39.0, this
+# file's original pin) capped protobuf<6 and were UNRESOLVABLE alongside
+# dbt-core in one environment -- verified both ways: 1.39.0 + dbt-core
+# fails with a real ResolutionImpossible (not a version-pin nuisance),
+# 1.55.0 + the full requirements.txt (dbt/dagster/prophet included)
+# resolves cleanly onto protobuf==6.33.6 for everyone. Confirmed via
+# `pip install --dry-run -r requirements.txt streamlit==1.55.0`.
+#
+# Because of that overlap, this file CAN now be installed into the same
+# venv as requirements.txt -- no separate .venv-dashboard needed:
+#
+#   pip install -r requirements.txt -r scripts/dev_dashboard/requirements-dashboard.txt
+#   streamlit run scripts/dev_dashboard/app.py
+
+streamlit==1.55.0

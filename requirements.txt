@@ -1,4 +1,5 @@
 # --- Core ---
+alembic==1.14.0
 python-dotenv==1.2.1
 pydantic==2.7.1
 pydantic-settings==2.2.1
