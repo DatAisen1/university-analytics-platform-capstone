@@ -33,7 +33,7 @@ logs/*
 warehouse/bronze_store/
 warehouse/silver_store/
 warehouse/gold_store/
-warehouse/meta.duckdb
+warehouse/*.duckdb
 
 # --- dbt ---
 dbt/target/
