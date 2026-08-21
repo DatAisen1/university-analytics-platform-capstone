@@ -108,6 +108,41 @@ def test_rerun_without_force_is_idempotent(fixture_output_dir, tmp_path):
     assert success_statuses == {"SKIPPED_ALREADY_INGESTED"}
 
 
+def test_rerun_against_wiped_storage_reingests_instead_of_skipping(fixture_output_dir, tmp_path):
+    """Regression test for the 2026-08-19 acceptance-test incident: if
+    meta.duckdb's run history says a partition was already ingested but
+    the object storage backend actually has nothing there (e.g. a fresh
+    MinIO volume, or a wiped bucket, while meta.duckdb -- a local file --
+    survived), `ingest_one` must NOT trust the stale log and skip. It
+    must detect the drift and actually re-ingest, so Bronze ends up
+    correct instead of silently empty."""
+    storage = LocalFileStorage(tmp_path / "bronze_store")
+    meta_conn = get_connection(tmp_path / "meta.duckdb")
+
+    # First run: populates both meta.duckdb's history AND storage.
+    ingest_all(storage=storage, meta_conn=meta_conn, data_generator_output=fixture_output_dir, reference=REFERENCE)
+    assert storage.list_keys("bronze/student")  # sanity: something is really there
+
+    # Simulate a wiped/rebuilt storage backend (fresh MinIO volume) while
+    # meta.duckdb's run history is untouched -- exactly what a
+    # `docker compose down -v && docker compose up` between sessions does.
+    wiped_storage = LocalFileStorage(tmp_path / "bronze_store_fresh")
+
+    results = ingest_all(
+        storage=wiped_storage, meta_conn=meta_conn,
+        data_generator_output=fixture_output_dir, reference=REFERENCE,
+    )
+
+    statuses = {(r["entity"], r["partition_key"]): r["status"] for r in results}
+    # Despite meta.duckdb showing prior SUCCESS for every one of these,
+    # the guard must detect that `wiped_storage` has no object and
+    # actually re-ingest -- not report SKIPPED_ALREADY_INGESTED.
+    assert statuses[("student", "all")] == "SUCCESS"
+    assert statuses[("college", "all")] == "SUCCESS"
+    assert statuses[("enrollment", "academic_year=2021/semester=1")] == "SUCCESS"
+    assert wiped_storage.list_keys("bronze/student")  # and it's really written this time
+
+
 def test_force_true_reprocesses_and_appends_new_batch_file(fixture_output_dir, tmp_path):
     storage = LocalFileStorage(tmp_path / "bronze_store")
     meta_conn = get_connection(tmp_path / "meta.duckdb")

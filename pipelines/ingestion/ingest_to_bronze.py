@@ -215,6 +215,14 @@ def _run_schema_validation(
                 "violation_count": failure_count, "summary": summary}
 
 
+def _bronze_partition_prefix(entity: str, partition_key: str) -> str:
+    """Prefix under which every batch for this (entity, partition_key)
+    lives, e.g. 'bronze/enrollment/academic_year=2021/semester=1/'.
+    Deliberately excludes batch_id -- existence is checked at the
+    partition level, not for one specific historical batch."""
+    return f"bronze/{entity}/{partition_key}/"
+
+
 def ingest_one(
     storage: ObjectStorage,
     meta_conn,
@@ -226,9 +234,44 @@ def ingest_one(
     force: bool = False,
 ) -> Dict[str, object]:
     """Ingest a single (entity, partition_key) unit: check idempotency,
-    load, validate, stamp, write, log. Returns a small summary dict."""
+    load, validate, stamp, write, log. Returns a small summary dict.
+
+    Root-cause fix (post-mortem: acceptance run 2026-08-19): the
+    idempotency check used to be `has_successful_run()` alone -- a query
+    against `meta.duckdb`'s run history, which is a LOCAL file untouched
+    by `docker compose down`/`up` or a fresh MinIO volume. That let the
+    guard report "already ingested" from a *previous* environment's
+    history while the *current* storage backend held nothing, so
+    `ingest_one` would skip the real write, `bronze` would report
+    SUCCESS, and every downstream stage would fail against empty Bronze
+    data several steps later with a confusing NoSuchKey error instead of
+    a clear one here.
+
+    The guard now requires BOTH the log to say "success" AND the
+    configured storage backend to actually contain an object for this
+    partition. If the log says yes but storage says no, the two have
+    drifted -- treat it as NOT yet ingested and do the real write,
+    rather than trusting history that no longer matches physical state.
+    """
     if not force and has_successful_run(meta_conn, STAGE, entity, partition_key):
-        return {"entity": entity, "partition_key": partition_key, "status": "SKIPPED_ALREADY_INGESTED"}
+        if storage.list_keys(_bronze_partition_prefix(entity, partition_key)):
+            return {"entity": entity, "partition_key": partition_key, "status": "SKIPPED_ALREADY_INGESTED"}
+        # Log/storage drift: meta.duckdb believes this succeeded, but the
+        # storage backend currently configured (STORAGE_BACKEND) has no
+        # object under this prefix. Don't trust stale history -- ingest
+        # for real, and make the drift visible in the returned status
+        # rather than silently overwriting log_says_done with a fresh
+        # write and hoping nobody checks.
+        record_run(
+            meta_conn, str(uuid.uuid4()), batch_id, STAGE, entity, partition_key,
+            datetime.now(timezone.utc), status="DRIFT_DETECTED",
+            error_message=(
+                "pipeline_run_log has a prior SUCCESS for this partition, but the "
+                "configured storage backend has no object at "
+                f"{_bronze_partition_prefix(entity, partition_key)!r} -- "
+                "re-ingesting instead of skipping."
+            ),
+        )
 
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)

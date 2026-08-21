@@ -37,7 +37,7 @@ from pathlib import Path
 
 from dagster import AssetExecutionContext, MetadataValue, asset
 from pipelines.common.dbt_runner import run_dbt
-from pipelines.common.errors import PipelineError, classify_exception
+from pipelines.common.errors import DataQualityFailureError, PipelineError, classify_exception
 from pipelines.common.logging_config import PipelineStageLogger
 from pipelines.common.settings import get_postgres_settings
 from models.forecasting.deploy_forecast import deploy_forecasts
@@ -131,6 +131,24 @@ def bronze(context: AssetExecutionContext) -> dict:
         counts = {}
         for item in results:
             counts[item["status"]] = counts.get(item["status"], 0) + 1
+
+        # Fail-loud guard: a per-(entity, partition) FAILED result used to
+        # be counted here and then silently dropped -- `bronze` would
+        # still report SUCCESS with a smaller `records_processed`, and
+        # the actual failure only surfaced as a confusing error several
+        # stages downstream (see silver's matching guard below for the
+        # incident this closes). Real ingestion failures must stop the
+        # asset here, where the cause is still directly attached.
+        failed = [item for item in results if item.get("status") == "FAILED"]
+        if failed:
+            raise DataQualityFailureError(
+                f"{len(failed)} of {len(results)} Bronze ingestion unit(s) failed: "
+                + "; ".join(f"{f['entity']}/{f['partition_key']}: {f['error']}" for f in failed),
+                stage="Bronze Ingestion",
+                rows_affected=len(failed),
+                details={"result_counts": counts},
+            )
+
         return {"records_processed": sum(item.get("rows", 0) for item in results if item.get("status") == "SUCCESS"), "result_counts": counts}
 
     result = _track_asset_run(context, "bronze", _run)
@@ -144,6 +162,31 @@ def silver(context: AssetExecutionContext) -> dict:
 
     def _run() -> dict:
         results = clean_all()
+
+        # Fail-loud guard (root-cause fix for the 2026-08-19 acceptance-test
+        # incident): clean_all() deliberately keeps processing other
+        # entities when one entity's Bronze read is missing -- that's
+        # correct, tested behavior at the entity level (see
+        # test_clean_all_missing_entity_recorded_as_failed_but_others_still_process).
+        # But this asset was then only ever summing the SUCCESS rows and
+        # returning normally -- so if EVERY entity failed (e.g. Bronze was
+        # actually empty), `silver` still reported Dagster SUCCESS with
+        # records_processed=0 and an empty rows_by_entity, and the
+        # downstream `validation` asset failed instead, several stages
+        # away from the real cause, on a plain NoSuchKey. The stage that
+        # owns "did Silver actually produce usable output" is this asset,
+        # not a downstream reader of one of its files -- so it must be
+        # the one that raises.
+        failed = [item for item in results if item["status"] == "FAILED"]
+        if failed:
+            raise DataQualityFailureError(
+                f"{len(failed)} of {len(results)} Silver entities failed to clean: "
+                + "; ".join(f"{f['entity']}: {f['error']}" for f in failed),
+                stage="Silver Cleaning",
+                rows_affected=len(failed),
+                details={"failed_entities": [f["entity"] for f in failed]},
+            )
+
         rows_by_entity = {item["entity"]: item.get("rows", 0) for item in results if item["status"] == "SUCCESS"}
         return {"records_processed": sum(rows_by_entity.values()), "rows_by_entity": rows_by_entity}
 
