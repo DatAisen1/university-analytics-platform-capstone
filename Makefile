@@ -2,7 +2,7 @@ COMPOSE := docker compose -f docker/docker-compose.yml --env-file .env
 ENV_FILE := .env
 PYTHON ?= python
 
-.PHONY: check-env up down down-v ps clean-start logs verify-minio bootstrap acceptance-test
+.PHONY: check-env up down down-v ps clean-start logs verify-minio verify-cmdstan bootstrap acceptance-test
 
 check-env:
 	@test -f $(ENV_FILE) || { \
@@ -32,6 +32,17 @@ clean-start: check-env
 
 verify-minio: check-env
 	$(PYTHON) scripts/verify_minio_data.py
+
+# P0 Final Acceptance Test finding: a fresh `pip install -r requirements.txt`
+# can leave Prophet's vendored CmdStan half-built (network interruption
+# during pip install), which only surfaces as a confusing
+# `'Prophet' object has no attribute 'stan_backend'` error deep into a
+# pipeline run, at the Model Training stage. This target proves Prophet
+# can actually fit a model right now, auto-remediating the broken-vendor
+# case -- see scripts/verify_cmdstan.py's module docstring for the full
+# story.
+verify-cmdstan:
+	$(PYTHON) scripts/verify_cmdstan.py
 
 # README's Quick Start has always documented this target ("make bootstrap
 # # runs migrations, seeds config, generates Faker data"), but no such

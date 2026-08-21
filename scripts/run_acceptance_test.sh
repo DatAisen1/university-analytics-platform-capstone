@@ -85,6 +85,23 @@ make bootstrap
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
+# Stage 7.5: Verify Prophet's CmdStan backend actually works, BEFORE
+# committing to the full job below.
+#
+# Found running this exact acceptance test: `pip install -r
+# requirements.txt` can leave Prophet's vendored CmdStan half-built (a
+# network interruption during pip install's own build step, which pip
+# still reports as a successful install). That failure was otherwise
+# invisible until the Model Training stage -- 6 asset stages and several
+# minutes into the run -- surfacing as a misleading
+# `'Prophet' object has no attribute 'stan_backend'` AttributeError with
+# no indication CmdStan was the actual cause. Checking this upfront turns
+# a late, confusing failure into an early, clear, auto-remediated one.
+# ---------------------------------------------------------------------
+section "7.5. Verify Prophet/CmdStan backend"
+python scripts/verify_cmdstan.py
+
+# ---------------------------------------------------------------------
 # Stage 8-16: Bronze -> Silver -> Gold -> Data Quality -> dbt -> Dagster
 # -> ML Feature Dataset -> Naive/Seasonal baselines -> Prophet ->
 # Walk-Forward Evaluation -> Model Comparison -> Model Registry ->

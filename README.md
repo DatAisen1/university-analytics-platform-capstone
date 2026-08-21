@@ -55,7 +55,7 @@ This project covers **3 academic years — `2021-2022`, `2022-2023`, `2023-2024`
 
 ## Quick Start — One Canonical Path
 
-This is the actual, verified sequence — the same one this repo's own CI pipeline (`.github/workflows/ci.yml`) runs end-to-end. There is deliberately only **one** documented path; `scripts/run_pipeline_with_minio.py` is a separate, explicitly-opt-in tool for validating the MinIO storage backend specifically (see its own module docstring) — not an alternative Quick Start.
+This is the actual, verified sequence — confirmed by running it end-to-end from a genuinely fresh database (see `scripts/run_acceptance_test.sh`). There is deliberately only **one** documented path; `scripts/run_pipeline_with_minio.py` is a separate, explicitly-opt-in tool for validating the MinIO storage backend specifically (see its own module docstring) — not an alternative Quick Start.
 
 ```bash
 # 1. Clone and configure
@@ -82,7 +82,7 @@ dbt deps --project-dir dbt --profiles-dir dbt
 dagster job execute -f orchestration/definitions.py -j full_pipeline_job
 ```
 
-Steps 3–6 are exactly what `.github/workflows/ci.yml`'s `integration-and-dbt-tests` job runs against a fresh Postgres on every push — so "does this still work from a clean clone" is checked automatically, not just asserted here.
+Steps 3–6 (plus `scripts/verify_cmdstan.py` before the final step) are exactly what `scripts/run_acceptance_test.sh` runs against a fresh Postgres — so "does this still work from a clean clone" is a real, re-runnable check (`make acceptance-test`), not just an assertion in this doc. There is no automated CI pipeline running this on every push yet — that's a real gap, tracked separately, not something to assume is already covered.
 
 **To explore interactively instead of running the full batch job:** `dagster dev -f orchestration/definitions.py` starts the Dagster UI, where you can materialize assets one at a time and inspect each stage's output.
 
@@ -104,7 +104,7 @@ Once the sequence above has run at least once, the Web Team needs exactly one th
 | `dagster job execute -f orchestration/definitions.py ...` fails immediately with an import/definition error | A missing dependency, or an env var `orchestration/assets.py`'s imports need isn't set (Dagster loads the whole module graph before running anything) | Run `python -c "from orchestration.definitions import defs"` in isolation first — it'll surface the real import error without Dagster's own error wrapping. Confirm `pip install -r requirements.txt` completed cleanly. |
 | `dbt run`/`dbt test` fails to connect, or `dbt deps` fails to compile the profile | `DBT_ROLE_PASSWORD` isn't set, or `DBT_PROFILES_DIR` isn't pointing at this repo's `dbt/profiles.yml` | `dbt/profiles.yml` reads `DBT_ROLE_PASSWORD` via `env_var()` with no default — it must be set even for `dbt deps`, which still parses the profile. Always pass `--profiles-dir dbt` (or `export DBT_PROFILES_DIR=dbt`) so dbt doesn't fall back to `~/.dbt/profiles.yml`. |
 | `dbt` tests are skipped, not run | `tests/unit/test_dbt_marts.py` / `test_dbt_staging.py` self-skip if Postgres or the `dbt` CLI isn't reachable, **and** `test_dbt_marts.py` additionally requires the marts to already exist (`dbt run` must have succeeded first) | Run the full Quick Start sequence above (steps 3–6) before `pytest` — the marts are built in step 6, not by the test suite itself. |
-| Prophet fails to import, or hangs on first use | Prophet's default backend (`cmdstanpy`) compiles a C++/Stan model the first time it's used in a fresh environment — this can take a few minutes and needs a working C++ toolchain, which isn't always present out of the box (especially in minimal containers) | This is expected on a genuinely first run — let it finish once; subsequent runs reuse the compiled model. If it fails outright, install build tools for your OS (e.g. `build-essential` on Debian/Ubuntu) and retry. This project's own `prophet_debug.log` also shows a *separate*, non-fatal issue — `prophet.plot` failing to import `plotly` — which only affects interactive plotting, not training/forecasting itself. |
+| `AttributeError: 'Prophet' object has no attribute 'stan_backend'` (usually surfaces late, at the Model Training pipeline stage) | `pip install prophet` normally also vendors a private, pre-built copy of CmdStan inside the `prophet` package itself — built via a network call *during* `pip install`. If that network call is interrupted or rate-limited, pip still reports a successful install, but the vendored copy is missing files (`Makefile`, `stan/`) it needs. Prophet's loader only checks that the directory *exists*, not that it *works*, so this failure is silent until the first real `.fit()` call — far downstream of the actual cause. | Run `python3 scripts/verify_cmdstan.py` (or `make verify-cmdstan`) **before** running the pipeline — it fits a real tiny Prophet model to prove the backend actually works, and auto-remediates this exact broken-vendor case by removing the bad copy and reinstalling via `cmdstanpy` directly. `scripts/run_acceptance_test.sh` now runs this automatically as its own stage, before the full pipeline job. |
 
 ## Tech Stack at a Glance (DE/DS Scope)
 
