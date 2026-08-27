@@ -20,12 +20,26 @@ dropout:
   # year 1 (real-world attrition is front-loaded), decaying afterward.
   # Year levels beyond 5 (shouldn't occur given the stall cap) fall back
   # to the highest defined key.
+  #
+  # Calibrated against CHED's most recent reported national attrition
+  # rate for SY 2023-2024 -- 35.15%, down from 40.98% the prior year
+  # (CHED chair Prospero de Vera III, Senate budget deliberations, Oct
+  # 2023: https://newsinfo.inquirer.net/1839954). These per-semester
+  # base rates, combined with the risk-multiplier's average effect
+  # (~0.93x, from the risk_score beta(2,5) distribution's mean of
+  # 0.286), were solved to produce ~35% cumulative dropout over a
+  # nominal 4-year program -- not eyeballed, worked backward from the
+  # target and then verified empirically against actual generator
+  # output (see docs/08_Faker_Data_Generator.md's calibration note).
+  # Front-loaded shape matches the cohort-survival literature finding
+  # that retention is lowest at the first-year level (Undergraduate
+  # Cohort Survival and Retention Rates, ResearchGate, 2022).
   base_prob_by_year_level:
-    1: 0.06
-    2: 0.035
-    3: 0.02
-    4: 0.015
-    5: 0.015
+    1: 0.108
+    2: 0.050
+    3: 0.030
+    4: 0.025
+    5: 0.025
   # Risk multiplier interpolates linearly between these bounds as
   # risk_score goes from 0 -> 1. A risk_score of 0 halves the base rate;
   # a risk_score of 1 doubles it.
@@ -69,8 +83,19 @@ stall:
 shifter:
   # Shifting is only modeled in years 1-2, reflecting real curriculum
   # lock-in after that point (see docs/08_Faker_Data_Generator.md).
-  probability_year_1: 0.02
-  probability_year_2: 0.01
+  #
+  # NOTE on confidence: this is the weakest-sourced calibration in this
+  # file. The only Philippine-specific number found was a 31-39% SHS-to-
+  # college COURSE MISMATCH rate (Exploring Between SHS Strand and
+  # College Course Mismatch, ResearchGate, 2022) -- a proxy for "wrong
+  # initial fit," not a direct "formally changed program after
+  # enrolling" rate; not every mismatched student actually files a
+  # shift (some tolerate it, some drop out instead). Treated as a soft
+  # upper bound, not a target. Raised from a prior ~5.9% cumulative rate
+  # (clearly too low) to ~13% cumulative -- a documented judgment call,
+  # not a directly-derived figure like dropout above.
+  probability_year_1: 0.09
+  probability_year_2: 0.045
   # Probability the new program is drawn from the SAME college (a lateral
   # move within, e.g., CICT) vs. a genuinely different college.
   same_college_weight: 0.7
