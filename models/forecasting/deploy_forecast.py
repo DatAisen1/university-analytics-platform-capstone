@@ -167,10 +167,14 @@ def _write_forecast_row(
                 INSERT INTO gold.fact_forecast (
                     program_key, college_key, metric, target_academic_year, target_semester_number,
                     target_period_ordinal, model_registry_key, model_version,
-                    yhat, yhat_lower, yhat_upper
+                    yhat, yhat_lower, yhat_upper, forecast_grain
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'program')
+                -- Targets ux_fact_forecast_program_grain (migration 0016) explicitly:
+                -- a partial unique index requires its WHERE predicate repeated here,
+                -- Postgres will not infer it from the index definition alone.
                 ON CONFLICT (program_key, metric, target_period_ordinal, model_version)
+                    WHERE forecast_grain = 'program'
                 DO UPDATE SET
                     yhat = EXCLUDED.yhat,
                     yhat_lower = EXCLUDED.yhat_lower,

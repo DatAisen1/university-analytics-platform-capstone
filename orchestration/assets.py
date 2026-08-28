@@ -41,6 +41,7 @@ from pipelines.common.errors import DataQualityFailureError, PipelineError, clas
 from pipelines.common.logging_config import PipelineStageLogger
 from pipelines.common.settings import get_postgres_settings
 from models.forecasting.deploy_forecast import deploy_forecasts
+from models.forecasting.rollup_forecast import build_rollups
 from models.forecasting.train_prophet import evaluate_all_series, train_final_models, write_evaluation_report
 from pipelines.common.metadata import get_connection, record_pipeline_run
 from pipelines.gold.build_dimensions import build_all_dimensions
@@ -356,6 +357,24 @@ def forecast(context: AssetExecutionContext) -> dict:
     return result
 
 
+@asset(group_name="forecast", deps=[forecast])
+def forecast_rollup(context: AssetExecutionContext) -> dict:
+    """DS Evaluation P1.1/P1.2: bottom-up college and campus-wide forecast
+    rollups, built from the program-level champions the `forecast` asset
+    just wrote/confirmed. Depends on `forecast` (not `evaluation`) because
+    it needs fact_forecast rows to already exist, not just trained models."""
+
+    def _run() -> dict:
+        password = get_postgres_settings().require_pipeline_writer_password()
+        engine = build_pipeline_writer_engine(password)
+        rollups = build_rollups(engine)
+        return {"records_processed": len(rollups), "rollups": [r.__dict__ for r in rollups]}
+
+    result = _track_asset_run(context, "forecast_rollup", _run)
+    context.add_output_metadata({"records_processed": result["records_processed"], "rollups": MetadataValue.json(result["rollups"])})
+    return result
+
+
 all_assets = [
     bronze,
     silver,
@@ -367,4 +386,5 @@ all_assets = [
     training,
     evaluation,
     forecast,
+    forecast_rollup,
 ]

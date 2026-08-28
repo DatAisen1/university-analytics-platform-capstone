@@ -98,7 +98,7 @@ def test_schedule_cadence_is_twice_yearly_not_a_shorter_cycle():
 
 def test_full_pipeline_job_selects_all_ten_assets():
     from orchestration.definitions import all_assets, full_pipeline_job
-    assert len(all_assets) == 10
+    assert len(all_assets) == 11  # bronze..forecast (10) + forecast_rollup (P1.1/P1.2, college/campus rollup)
     assert full_pipeline_job.name == "full_pipeline_job"
 
 
@@ -184,14 +184,14 @@ def test_full_pipeline_materializes_successfully_via_dagster():
     # it is not a shell-quoting issue, and not fixed by changing how
     # the caller is invoked). Rather than depend on wildcard-selection
     # behavior that isn't reliable across platforms/versions, select
-    # the ten pipeline assets explicitly -- the same fixed list
+    # the eleven pipeline assets explicitly -- the same fixed list
     # test_full_pipeline_job_selects_all_ten_assets already asserts
     # against, so this stays in sync with that test by construction.
     # This is also arguably the more correct test regardless of the
     # Windows quirk: it proves this exact graph materializes, not
     # "whatever `*` happens to resolve to."
     asset_selection = (
-        "bronze,silver,validation,gold,warehouse,dbt,features,training,evaluation,forecast"
+        "bronze,silver,validation,gold,warehouse,dbt,features,training,evaluation,forecast,forecast_rollup"
     )
     result = subprocess.run(
         [sys.executable, "-m", "dagster", "asset", "materialize", "--select", asset_selection, "-f", "orchestration/definitions.py"],
@@ -214,6 +214,6 @@ def test_full_pipeline_materializes_successfully_via_dagster():
     combined_output = result.stdout + result.stderr
     for asset_name in [
         "bronze", "silver", "validation", "gold", "warehouse",
-        "dbt", "features", "training", "evaluation", "forecast",
+        "dbt", "features", "training", "evaluation", "forecast", "forecast_rollup",
     ]:
         assert f"Materialized value {asset_name}" in combined_output, f"{asset_name} did not materialize"
