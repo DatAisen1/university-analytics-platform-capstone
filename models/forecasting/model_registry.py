@@ -33,13 +33,43 @@ No row's provenance is ever overwritten (Task 41): the only UPDATE
 this module issues is is_champion = FALSE on the row being demoted
 during a promotion. get_model_history / get_model_for_forecast answer
 "which model generated this forecast?" directly from that history.
+
+P1 Graduation_count reporting honesty -- Option B (registrable baseline
+champions), added below the original divider:
+
+  Task 39's decide_promotion (above) treats Prophet as the only thing
+  that can ever be "the candidate" -- a baseline is purely the bar it
+  has to clear. That's a real coverage gap for a low-count metric like
+  graduation_count: a tie or a loss to baseline leaves the series with
+  NO deployed forecast at all, even though a naive/seasonal forecast
+  was sitting right there the whole time, unused.
+
+  select_champion_algorithm() removes that asymmetry: every algorithm
+  actually evaluated this cycle (prophet, naive, historical_avg,
+  seasonal_naive -- whichever have a defined walk-forward MAE) competes
+  on equal footing, lowest MAE wins, ties go to the simpler algorithm
+  (ALGORITHM_SIMPLICITY_RANK). decide_champion_promotion() then applies
+  only Task 39's SECOND criterion (no worse than the existing champion)
+  to that cycle's winner -- the "beats a baseline" criterion is no
+  longer a separate gate because the winner is, by construction, at
+  least as good as every baseline evaluated this cycle (it might BE
+  one). Net effect: a series only goes without a deployed champion when
+  it lacks enough history to evaluate anything at all
+  (has_sufficient_history in train_prophet.py), not because Prophet in
+  particular came up short.
+
+  algorithm remained a free-text, unconstrained VARCHAR(32) column since
+  migration 0009 added it ("Tracked explicitly rather than assumed, so
+  the registry stays correct the day a second algorithm is introduced" --
+  that migration's own comment). No schema change is needed for Option
+  B: the day has arrived, the column was already ready for it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -376,14 +406,157 @@ def should_retrain(current_max_period_ordinal: int, last_trained_period_ordinal:
     )
 
 
-def make_model_version(program_id: str, metric: str, trained_at: Optional[datetime] = None) -> str:
+def make_model_version(program_id: str, metric: str, algorithm: str, trained_at: Optional[datetime] = None) -> str:
     """Deterministic, sortable, globally-unique model_version string,
-    e.g. 'BSCS_enrollment_count_20260802T140501Z'.
+    e.g. 'BSCS_graduation_count_seasonal_naive_20260802T140501Z'.
 
     P1 fix: keyed by program_id, not college_id -- the grain moved from
-    (college, metric) to (program, metric); see migration 0013."""
+    (college, metric) to (program, metric); see migration 0013.
+
+    Option B fix: algorithm is now a REQUIRED third component of the
+    string, not an afterthought -- uq_model_registry_program_metric_version
+    is UNIQUE on (program_key, metric, model_version), and a run that
+    evaluates multiple algorithms for the same series needs each one's
+    model_version to stay distinguishable even when they're trained in
+    the same second."""
     trained_at = trained_at or datetime.now(timezone.utc)
-    return f"{program_id}_{metric}_{trained_at.strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{program_id}_{metric}_{algorithm}_{trained_at.strftime('%Y%m%dT%H%M%SZ')}"
+
+
+# --- Option B: multi-algorithm champion selection ---------------------------
+
+@dataclass(frozen=True)
+class AlgorithmResult:
+    """One algorithm's walk-forward evaluation result for a single series --
+    the unit select_champion_algorithm compares. Every algorithm this
+    project can register (prophet + the three baselines in baselines.py)
+    is represented identically here, so champion selection treats all of
+    them uniformly instead of hardcoding Prophet as "the candidate" and
+    everything else as "the bar it has to clear" (that hardcoding is
+    exactly what CandidateMetrics/decide_promotion above still do, kept
+    for backward compatibility -- see this module's Option B docstring
+    section)."""
+
+    algorithm: str
+    mae: float
+    rmse: float
+    mape: Optional[float]
+    r2: float
+
+
+# Occam's-razor tie-break order when two algorithms' MAE is equal to
+# within floating-point precision -- lower rank wins. Ordered by how much
+# machinery each needs to produce its prediction: naive needs one stored
+# value, seasonal_naive needs one prior-season value, historical_avg needs
+# the full training mean, prophet fits a full model. Not in
+# baselines.BASELINE_ALGORITHMS order because that tuple is unordered by
+# design; this ranking is a deliberate, separate decision.
+ALGORITHM_SIMPLICITY_RANK = {
+    "naive": 0,
+    "seasonal_naive": 1,
+    "historical_avg": 2,
+    "prophet": 3,
+}
+
+
+@dataclass(frozen=True)
+class ChampionSelection:
+    """select_champion_algorithm's result: the winner, why it won, and the
+    full ranked field (best-to-worst) so a caller building an audit trail
+    or a coverage report doesn't have to re-sort candidates itself."""
+
+    winner: AlgorithmResult
+    reason: str
+    ranked: Tuple[AlgorithmResult, ...]
+
+
+def select_champion_algorithm(candidates: Sequence[AlgorithmResult]) -> ChampionSelection:
+    """Option B's core decision: out of EVERY algorithm actually evaluated
+    this cycle for a series, which one wins? Prophet is not privileged --
+    it wins only when it genuinely has the lowest walk-forward MAE among
+    whatever was evaluated. Ties (MAE equal within 1e-6) go to the
+    simpler algorithm per ALGORITHM_SIMPLICITY_RANK.
+
+    Callers are responsible for excluding any algorithm with an undefined
+    MAE before calling this (e.g. seasonal_naive with zero eligible
+    walk-forward folds produces NaN -- see train_prophet.walk_forward_evaluate) --
+    same division of responsibility evaluate_all_series already uses when
+    folding seasonal_naive into best_baseline_mae. A NaN MAE here would
+    otherwise silently sort as neither greatest nor least and corrupt
+    the ranking.
+    """
+    if not candidates:
+        raise ValueError("select_champion_algorithm requires at least one candidate")
+
+    def sort_key(c: AlgorithmResult) -> Tuple[float, int]:
+        return (round(c.mae, 6), ALGORITHM_SIMPLICITY_RANK.get(c.algorithm, 99))
+
+    ranked = tuple(sorted(candidates, key=sort_key))
+    winner = ranked[0]
+    others = ranked[1:]
+    if others:
+        detail = "; ".join(f"{c.algorithm} MAE {c.mae:.4f}" for c in others)
+        reason = f"{winner.algorithm} wins this cycle with MAE {winner.mae:.4f}, ahead of {detail}"
+    else:
+        reason = f"{winner.algorithm} is the only algorithm evaluated this cycle (MAE {winner.mae:.4f})"
+    return ChampionSelection(winner=winner, reason=reason, ranked=ranked)
+
+
+def decide_champion_promotion(winner: AlgorithmResult, champion: Optional[ChampionRecord]) -> PromotionDecision:
+    """Option B's promotion gate -- supersedes decide_promotion as the
+    function models/forecasting/deploy_forecast.py actually calls.
+
+    Task 39's original criterion 1 ("must beat the best baseline") is not
+    reproduced here as a separate check: `winner` already came out of
+    select_champion_algorithm, so by construction it is at least as good
+    as every baseline evaluated this cycle -- possibly because it IS one.
+    What's left is exactly Task 39's criterion 2: a series with no
+    existing champion promotes trivially (bootstrap); otherwise this
+    cycle's winner must be no worse than the champion already deployed
+    for this series, regardless of which algorithm produced either one.
+
+    Reuses PromotionDecision (not a new dataclass) so record_candidate
+    and every existing caller of that shape keep working unchanged --
+    baseline_mae/candidate_mae/mae_diff here describe "current champion
+    MAE vs. this cycle's winner MAE" rather than "baseline vs.
+    candidate," which is the meaningful comparison left once criterion 1
+    is structurally satisfied.
+    """
+    if champion is None:
+        return PromotionDecision(
+            promote=True,
+            reason=(
+                f"{winner.algorithm} selected as this cycle's best-performing algorithm "
+                f"(MAE {winner.mae:.4f}); no existing champion (bootstrap)"
+            ),
+            baseline_mae=winner.mae,
+            candidate_mae=winner.mae,
+            mae_diff=0.0,
+        )
+
+    mae_diff = winner.mae - champion.mae
+    if winner.mae > champion.mae:
+        return PromotionDecision(
+            promote=False,
+            reason=(
+                f"{winner.algorithm} (MAE {winner.mae:.4f}) is worse than current champion "
+                f"{champion.model_version} (MAE {champion.mae:.4f}, diff {mae_diff:+.4f})"
+            ),
+            baseline_mae=champion.mae,
+            candidate_mae=winner.mae,
+            mae_diff=mae_diff,
+        )
+
+    return PromotionDecision(
+        promote=True,
+        reason=(
+            f"{winner.algorithm} (MAE {winner.mae:.4f}) matches or improves on current champion "
+            f"{champion.model_version} (MAE {champion.mae:.4f}, diff {mae_diff:+.4f})"
+        ),
+        baseline_mae=champion.mae,
+        candidate_mae=winner.mae,
+        mae_diff=mae_diff,
+    )
 
 
 # --------------------------------------

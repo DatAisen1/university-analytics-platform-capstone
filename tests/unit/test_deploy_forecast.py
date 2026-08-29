@@ -125,7 +125,15 @@ def patched_fit_and_record(monkeypatch):
     return write_calls
 
 
-def _patch_common(monkeypatch, *, retrain: bool, promote: bool):
+def _patch_common(monkeypatch, *, retrain: bool, promote: bool, prophet_wins: bool = True):
+    """Option B: walk_forward_evaluate now returns genuinely different
+    fold results per algorithm (not identical stubs) so the REAL
+    compute_metrics_for_model / select_champion_algorithm run against
+    them and a test can control, honestly, which algorithm wins --
+    `prophet_wins` picks which. decide_champion_promotion (not the
+    retired decide_promotion) is still mocked, since these tests are
+    about orchestration, not re-testing model_registry's own promotion
+    logic (that's tests/unit/test_model_registry.py's job)."""
     monkeypatch.setattr(deploy_forecast, "load_series", lambda engine: _series_frame())
     monkeypatch.setattr(deploy_forecast, "get_last_trained_period_ordinal", lambda engine, program_key, metric: None)
     monkeypatch.setattr(
@@ -133,28 +141,33 @@ def _patch_common(monkeypatch, *, retrain: bool, promote: bool):
         "should_retrain",
         lambda current_max, last_trained: RetrainDecision(should_retrain=retrain, reason="fixture"),
     )
-    monkeypatch.setattr(
-        deploy_forecast,
-        "walk_forward_evaluate",
-        lambda program_series, metric, test_ordinals: {
-            "naive": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},
-            "historical_avg": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},
-            "prophet": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},
-        },
-    )
-    monkeypatch.setattr(
-        deploy_forecast,
-        "compute_metrics_for_model",
-        lambda actual, predicted: {"mae": 1.0, "rmse": 1.0, "mape": 5.0, "r2": 0.9},
-    )
+    if prophet_wins:
+        fold_results = {
+            "naive": {"actual": [1.0, 2.0], "predicted": [9.0, 9.0]},
+            "historical_avg": {"actual": [1.0, 2.0], "predicted": [9.0, 9.0]},
+            "prophet": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},  # zero error -- wins outright
+        }
+    else:
+        fold_results = {
+            "naive": {"actual": [1.0, 2.0], "predicted": [1.0, 2.0]},  # zero error -- wins outright
+            "historical_avg": {"actual": [1.0, 2.0], "predicted": [9.0, 9.0]},
+            "prophet": {"actual": [1.0, 2.0], "predicted": [9.0, 9.0]},
+        }
+    monkeypatch.setattr(deploy_forecast, "walk_forward_evaluate", lambda program_series, metric, test_ordinals: fold_results)
+    # compute_metrics_for_model is deliberately left as the real,
+    # unmocked function (imported from train_prophet) -- Option B's
+    # champion selection needs REAL, differentiated MAEs to pick
+    # between, not a single constant every algorithm shares.
     monkeypatch.setattr(deploy_forecast, "get_current_champion", lambda engine, program_key, metric: None)
     monkeypatch.setattr(
         deploy_forecast,
-        "decide_promotion",
-        lambda candidate, champion: PromotionDecision(promote=promote, reason="fixture decision"),
+        "decide_champion_promotion",
+        lambda winner, champion: PromotionDecision(
+            promote=promote, reason="fixture decision", baseline_mae=0.0, candidate_mae=winner.mae, mae_diff=0.0,
+        ),
     )
     monkeypatch.setattr(
-        deploy_forecast, "make_model_version", lambda program_id, metric: f"{program_id}_{metric}_v1"
+        deploy_forecast, "make_model_version", lambda program_id, metric, algorithm: f"{program_id}_{metric}_{algorithm}_v1"
     )
 
 
@@ -192,6 +205,7 @@ def test_deploy_forecasts_writes_forecast_row_and_marks_promoted_when_candidate_
     assert all(r.retrained is True for r in results)
     assert all(r.promoted is True for r in results)
     assert all(r.yhat == 50.0 for r in results)
+    assert all(r.algorithm == "prophet" for r in results)  # Option B: prophet won this cycle's comparison
     assert all(r.target_academic_year is not None and r.target_semester_number is not None for r in results)
 
     # one gold.fact_forecast write per (college, metric) series
@@ -286,3 +300,97 @@ def test_deploy_forecasts_reuses_the_same_dataset_fingerprint_across_candidates_
 
     fingerprints = {meta.dataset_fingerprint for meta in patched_fit_and_record_capturing_training_meta}
     assert len(fingerprints) == 1
+
+
+# --------------------------------------------------------------------------
+# Option B: baseline algorithms as registrable, deployable champions
+# --------------------------------------------------------------------------
+
+def test_deploy_forecasts_deploys_a_baseline_champion_when_it_wins_the_cycle(
+    monkeypatch, patched_fit_and_record, tmp_path
+):
+    """The core Option B behavior: when a baseline genuinely has the lowest
+    walk-forward MAE this cycle, IT gets deployed -- not Prophet, and not
+    "nothing." fit_prophet is stubbed but must never be called on this
+    path (see assertion below): Option B's whole efficiency argument is
+    that a losing Prophet refit is skipped, not just its promotion."""
+    fit_prophet_calls = []
+    monkeypatch.setattr(
+        deploy_forecast,
+        "fit_prophet",
+        lambda train_df: fit_prophet_calls.append(train_df) or _FakeModel(50.0, 40.0, 60.0),
+    )
+    _patch_common(monkeypatch, retrain=True, promote=True, prophet_wins=False)
+
+    results = deploy_forecast.deploy_forecasts(engine=object(), artifacts_dir=tmp_path)
+
+    assert all(r.promoted is True for r in results)
+    assert all(r.algorithm == "naive" for r in results)
+    assert fit_prophet_calls == []  # never refit -- naive won, so Prophet was never built
+
+    # naive_baseline predicts the LAST observed value for the series --
+    # _series_frame() has enrollment_count = 100+ordinal, graduation_count
+    # = 5+ordinal, ordinals 0-7, so the last values are 107 and 12.
+    by_metric = {r.metric: r for r in results}
+    assert by_metric["enrollment_count"].yhat == 107.0
+    assert by_metric["graduation_count"].yhat == 12.0
+
+    for call in patched_fit_and_record:
+        assert call["yhat_lower"] == call["yhat_upper"] == call["yhat"]  # degenerate CI, as documented
+
+    # model_version carries the winning algorithm, not a hardcoded 'prophet'
+    assert all("naive" in r.model_version for r in results)
+
+
+def test_deploy_forecasts_still_records_a_rejected_baseline_candidate(
+    monkeypatch, patched_fit_and_record, tmp_path
+):
+    """A baseline that wins the walk-forward comparison but loses to an
+    already-stronger existing champion is still recorded (Task 39 audit
+    trail), just never written to gold.fact_forecast -- same rule as a
+    rejected Prophet candidate always followed, generalized to any
+    algorithm."""
+    _patch_common(monkeypatch, retrain=True, promote=False, prophet_wins=False)
+
+    results = deploy_forecast.deploy_forecasts(engine=object(), artifacts_dir=tmp_path)
+
+    assert all(r.promoted is False for r in results)
+    assert all(r.algorithm == "naive" for r in results)
+    assert all(r.yhat is None for r in results)
+    assert patched_fit_and_record == []  # rejected candidates never reach the write-back step
+
+    artifacts = list(tmp_path.glob("*.pkl"))
+    assert len(artifacts) > 0  # still pickled for audit purposes, same as a rejected Prophet model
+
+
+def test_build_champion_model_prophet_refits_on_full_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(deploy_forecast, "fit_prophet", lambda train_df: _FakeModel(1.0, 1.0, 1.0))
+    program_series = _series_frame()
+    model, training_record_count = deploy_forecast._build_champion_model(
+        "prophet", program_series, "enrollment_count", target_period_ordinal=8,
+    )
+    assert training_record_count == 8
+    assert model.predict(pd.DataFrame({"ds": ["2025-01-01"]}))["yhat"].iloc[0] == 1.0
+
+
+def test_build_champion_model_naive_wraps_a_baseline_model(tmp_path):
+    program_series = _series_frame()
+    model, training_record_count = deploy_forecast._build_champion_model(
+        "naive", program_series, "enrollment_count", target_period_ordinal=8,
+    )
+    assert training_record_count == 8
+    forecast = model.predict(pd.DataFrame({"ds": ["2025-01-01"]}))
+    assert forecast["yhat"].iloc[0] == 107.0  # last observed enrollment_count value
+    assert forecast["yhat_lower"].iloc[0] == forecast["yhat_upper"].iloc[0] == 107.0
+
+
+def test_build_champion_model_seasonal_naive_raises_when_lookback_is_missing(tmp_path):
+    """Deployment-time requirement is stricter than walk-forward eligibility
+    -- the required prior-season value must exist at the ACTUAL forecast
+    target, not just within some historical fold. deploy_forecasts()
+    catches this ValueError and falls back to the next-best algorithm."""
+    program_series = _series_frame()
+    with pytest.raises(ValueError, match="seasonal_naive_baseline"):
+        deploy_forecast._build_champion_model(
+            "seasonal_naive", program_series, "enrollment_count", target_period_ordinal=100,
+        )

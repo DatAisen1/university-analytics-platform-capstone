@@ -47,6 +47,18 @@ load_series() pull and reused across every candidate that run trains, so
 a forecast row (joined via model_registry_key) can be traced back to the
 exact dataset snapshot that produced it, not just the training window it
 covered.
+
+P1 Graduation_count reporting honesty -- Option B (registrable baseline
+champions, models.forecasting.model_registry.select_champion_algorithm /
+decide_champion_promotion): the per-series loop below no longer treats
+Prophet as "the candidate" with baselines as a fixed bar it must clear.
+Every algorithm with a defined walk-forward MAE this cycle (prophet,
+naive, historical_avg, and seasonal_naive when it has an eligible fold)
+competes on equal footing; whichever wins is the candidate that gets
+recorded and, if it doesn't regress on the existing champion, deployed.
+Prophet is only refit on full history (the expensive step) when it
+actually wins -- a series where a baseline already wins the walk-forward
+comparison has no reason to pay for a Prophet refit nobody will deploy.
 """
 
 from __future__ import annotations
@@ -59,21 +71,26 @@ from typing import List, Optional
 
 import pandas as pd
 
+from models.forecasting.baselines import build_deployable_baseline
 from models.forecasting.model_registry import (
+    AlgorithmResult,
     CandidateMetrics,
+    ChampionSelection,
     PromotionDecision,
     RetrainDecision,
     TrainingMetadata,
-    decide_promotion,
+    decide_champion_promotion,
     get_current_champion,
     get_last_trained_period_ordinal,
     make_model_version,
     record_candidate,
+    select_champion_algorithm,
     should_retrain,
 )
 from models.forecasting.train_prophet import (
     DEFAULT_ARTIFACTS_DIR,
     MIN_HISTORY_PERIODS,
+    SEASON_LENGTH,
     TARGET_METRICS,
     compute_metrics_for_model,
     derive_test_period_ordinals,
@@ -92,7 +109,6 @@ logger = logging.getLogger(__name__)
 # exactly (0-based, (year - 2021) * 2 + (semester_number - 1)) -- the
 # SAME formula, not a reimplementation that could drift from it.
 _BASE_ACADEMIC_YEAR = 2021
-_ALGORITHM = "prophet"
 
 
 def _period_ordinal(academic_year: int, semester_number: int) -> int:
@@ -125,6 +141,11 @@ class DeploymentResult:
     target_academic_year: Optional[int] = None
     target_semester_number: Optional[int] = None
     yhat: Optional[float] = None
+    # Option B: which algorithm won this cycle's champion selection --
+    # 'prophet', 'naive', 'historical_avg', or 'seasonal_naive'. None only
+    # when retrained is False (the retrain gate skipped this series before
+    # any algorithm was evaluated) or the series lacked sufficient history.
+    algorithm: Optional[str] = None
 
 
 def _forecast_next_period(model, target_ds: str) -> tuple[float, float, float]:
@@ -143,6 +164,30 @@ def _forecast_next_period(model, target_ds: str) -> tuple[float, float, float]:
 def _semester_to_date(academic_year: int, semester_number: int) -> str:
     month_day = "01-01" if semester_number == 1 else "07-01"
     return f"{academic_year}-{month_day}"
+
+
+def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: str, target_period_ordinal: int):
+    """Option B: build the deployable model object for whichever algorithm
+    won champion selection this cycle, and the training record count to
+    log alongside it. Returns (model, training_record_count) where `model`
+    exposes `.predict(future_df) -> DataFrame[yhat, yhat_lower, yhat_upper]`
+    regardless of algorithm -- Prophet's own model for 'prophet',
+    baselines.BaselineModel (degenerate interval, see that module's
+    docstring) for anything else.
+
+    Raises ValueError only for 'seasonal_naive' with no training value at
+    the required prior-season period_ordinal -- the caller
+    (deploy_forecasts) is responsible for falling back when that happens.
+    """
+    if algorithm == "prophet":
+        train_df = to_prophet_frame(program_series, metric)
+        model = fit_prophet(train_df)
+        return model, len(train_df)
+
+    period_ordinals = program_series["period_ordinal"].tolist()
+    train_values = program_series[metric].tolist()
+    model = build_deployable_baseline(algorithm, period_ordinals, train_values, target_period_ordinal, SEASON_LENGTH)
+    return model, len(train_values)
 
 
 def _write_forecast_row(
@@ -295,39 +340,99 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                 model_metrics = {
                     name: compute_metrics_for_model(r["actual"], r["predicted"]) for name, r in fold_results.items()
                 }
-                best_baseline_mae = min(model_metrics["naive"]["mae"], model_metrics["historical_avg"]["mae"])
-                beats_baseline = model_metrics["prophet"]["mae"] < best_baseline_mae
 
-                prophet_mape = model_metrics["prophet"]["mape"]
+                # Option B: every algorithm with a DEFINED walk-forward MAE this
+                # cycle is a candidate for champion, not just Prophet.
+                # seasonal_naive is excluded when it has zero eligible folds
+                # (NaN MAE, same condition evaluate_all_series already checks
+                # before folding it into best_baseline_mae) -- a NaN here would
+                # otherwise corrupt select_champion_algorithm's ranking.
+                algorithm_candidates: List[AlgorithmResult] = []
+                for name, m in model_metrics.items():
+                    if pd.isna(m["mae"]):
+                        continue
+                    algorithm_candidates.append(
+                        AlgorithmResult(
+                            algorithm=name,
+                            mae=m["mae"],
+                            rmse=m["rmse"],
+                            mape=None if pd.isna(m["mape"]) else float(m["mape"]),
+                            r2=m["r2"],
+                        )
+                    )
+                selection: ChampionSelection = select_champion_algorithm(algorithm_candidates)
+
+                # best_baseline_mae / beats_baseline are still populated (Task
+                # 39/P1.24's original reporting fields, and gold.model_registry
+                # NOT NULL columns) -- "best baseline" here means the best of
+                # the three baseline algorithms specifically, regardless of
+                # which algorithm this cycle's winner turned out to be, so the
+                # field keeps its original meaning even when the winner IS a
+                # baseline (in which case beats_baseline is correctly False:
+                # a baseline doesn't "beat" itself, it simply wins outright).
+                baseline_maes = [
+                    c.mae for c in algorithm_candidates if c.algorithm in ("naive", "historical_avg", "seasonal_naive")
+                ]
+                best_baseline_mae = min(baseline_maes) if baseline_maes else selection.winner.mae
                 candidate = CandidateMetrics(
-                    mae=model_metrics["prophet"]["mae"],
-                    rmse=model_metrics["prophet"]["rmse"],
-                    mape=None if pd.isna(prophet_mape) else float(prophet_mape),
-                    r2=model_metrics["prophet"]["r2"],
+                    mae=selection.winner.mae,
+                    rmse=selection.winner.rmse,
+                    mape=selection.winner.mape,
+                    r2=selection.winner.r2,
                     best_baseline_mae=best_baseline_mae,
-                    beats_baseline=beats_baseline,
+                    beats_baseline=selection.winner.mae < best_baseline_mae,
                 )
 
                 champion = get_current_champion(engine, program_key, metric)
-                decision: PromotionDecision = decide_promotion(candidate, champion)
-                model_version = make_model_version(program_id, metric)
+                decision: PromotionDecision = decide_champion_promotion(selection.winner, champion)
+                model_version = make_model_version(program_id, metric, selection.winner.algorithm)
 
-                # Refit on the FULL history regardless of the decision -- an
-                # evaluation-only candidate still needs an artifact on disk
-                # so its walk-forward result is reproducible/inspectable
-                # later, even if it's never deployed.
-                train_df = to_prophet_frame(program_series, metric)
-                model = fit_prophet(train_df)
+                target_year, target_semester, target_ordinal = _next_target_period(current_max_period_ordinal)
+                target_ds = _semester_to_date(target_year, target_semester)
+
+                # Build (and pickle) the deployable model for whichever
+                # algorithm actually won -- Prophet is only refit on full
+                # history here when it won; a baseline win skips that
+                # (expensive) refit entirely. See module docstring.
+                try:
+                    model, training_record_count = _build_champion_model(
+                        selection.winner.algorithm, program_series, metric, target_ordinal,
+                    )
+                except ValueError as exc:
+                    # Only seasonal_naive can raise here (missing prior-season
+                    # value at the DEPLOYMENT target, a stricter requirement
+                    # than "had >=1 eligible fold during walk-forward" -- rare,
+                    # but not impossible near MIN_HISTORY_PERIODS). Fall back
+                    # to the next-best already-ranked algorithm rather than
+                    # failing the whole series.
+                    logger.warning(
+                        "%s/%s: winning algorithm %s could not be materialized for "
+                        "deployment (%s); falling back to next-best algorithm",
+                        program_id, metric, selection.winner.algorithm, exc,
+                    )
+                    remaining = [c for c in selection.ranked if c.algorithm != selection.winner.algorithm]
+                    selection = select_champion_algorithm(remaining)
+                    model_version = make_model_version(program_id, metric, selection.winner.algorithm)
+                    model, training_record_count = _build_champion_model(
+                        selection.winner.algorithm, program_series, metric, target_ordinal,
+                    )
+                    decision = decide_champion_promotion(selection.winner, champion)
+                    candidate = CandidateMetrics(
+                        mae=selection.winner.mae, rmse=selection.winner.rmse, mape=selection.winner.mape,
+                        r2=selection.winner.r2, best_baseline_mae=best_baseline_mae,
+                        beats_baseline=selection.winner.mae < best_baseline_mae,
+                    )
+
                 artifact_path = artifacts_dir / f"{model_version}.pkl"
                 with artifact_path.open("wb") as f:
                     pickle.dump(model, f)
 
                 training_meta = TrainingMetadata(
-                    algorithm=_ALGORITHM,
+                    algorithm=selection.winner.algorithm,
                     dataset_fingerprint=dataset_fingerprint,
                     training_data_start_period_ordinal=current_min_period_ordinal,
                     training_data_end_period_ordinal=current_max_period_ordinal,
-                    training_record_count=len(train_df),
+                    training_record_count=training_record_count,
                 )
 
                 model_registry_key = record_candidate(
@@ -346,6 +451,7 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                     promoted=decision.promote,
                     reason=decision.reason,
                     candidate_mae=candidate.mae,
+                    algorithm=selection.winner.algorithm,
                 )
 
                 if not decision.promote:
@@ -353,8 +459,6 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                     results.append(DeploymentResult(**result_kwargs))
                     continue
 
-                target_year, target_semester, target_ordinal = _next_target_period(current_max_period_ordinal)
-                target_ds = _semester_to_date(target_year, target_semester)
                 yhat, yhat_lower, yhat_upper = _forecast_next_period(model, target_ds)
 
                 _write_forecast_row(
@@ -372,8 +476,8 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                     yhat_upper=yhat_upper,
                 )
                 logger.info(
-                    "Promoted %s (MAE %.4f): forecast %.2f for %s-%s",
-                    model_version, candidate.mae, yhat, target_year, target_semester,
+                    "Promoted %s (algorithm=%s, MAE %.4f): forecast %.2f for %s-%s",
+                    model_version, selection.winner.algorithm, candidate.mae, yhat, target_year, target_semester,
                 )
 
                 results.append(
@@ -410,6 +514,22 @@ if __name__ == "__main__":
         f"{len(retrained)}/{len(outcomes)} series retrained ({len(skipped)} skipped, no new data); "
         f"{len(promoted)}/{len(retrained)} retrained candidates promoted."
     )
+    # Option B / P1.5 (graduation_count reporting honesty): coverage and
+    # champion-algorithm mix are the headline here -- MAPE never is. A
+    # per-metric breakdown because a mixed enrollment_count+graduation_count
+    # aggregate hides exactly the kind of series-level story this section
+    # exists to surface (docs/10_Forecasting.md P1.5/P1.6).
+    for metric in TARGET_METRICS:
+        metric_outcomes = [r for r in outcomes if r.metric == metric]
+        metric_promoted = [r for r in metric_outcomes if r.promoted]
+        pct = f"{len(metric_promoted) / len(metric_outcomes):.0%}" if metric_outcomes else "N/A"
+        print(f"  {metric}: {len(metric_promoted)}/{len(metric_outcomes)} series have a deployed champion ({pct})")
+        algo_counts: dict[str, int] = {}
+        for r in metric_promoted:
+            algo_counts[r.algorithm or "unknown"] = algo_counts.get(r.algorithm or "unknown", 0) + 1
+        if algo_counts:
+            breakdown = ", ".join(f"{algo}: {n}" for algo, n in sorted(algo_counts.items()))
+            print(f"    champion algorithm mix -- {breakdown}")
     for r in skipped:
         print(f"  SKIPPED {r.program_id} ({r.college_id})/{r.metric}: {r.reason}")
     for r in rejected:
