@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -540,8 +541,32 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         "# Forecast Model Evaluation Report",
         "",
         f"Prophet beats the best baseline on **{beats_count} of {total}** series "
-        f"({pct_display}).",
+        f"({pct_display}) overall.",
         "",
+    ]
+
+    # P1.5: the combined headline above blends enrollment_count and
+    # graduation_count into a single number, which hides that the two
+    # metrics behave very differently -- graduation_count is low-volume
+    # and spiky, so Prophet wins it far less often than enrollment_count
+    # (see docs/10_Forecasting.md SS8). A reader relying on the headline
+    # alone would wrongly read Prophet as uniformly ~X% reliable, when
+    # the real story is metric-specific. Break it out explicitly, per
+    # metric, sorted for a stable/diffable report across runs.
+    if total:
+        lines.append("**Breakdown by metric:**")
+        lines.append("")
+        for metric_name, group in report_df.groupby("metric", sort=True):
+            metric_total = len(group)
+            metric_beats = int(group["prophet_beats_best_baseline"].sum())
+            metric_pct = f"{metric_beats / metric_total:.0%}" if metric_total else "N/A"
+            lines.append(f"- `{metric_name}`: {metric_beats} of {metric_total} ({metric_pct})")
+        lines.append("")
+    else:
+        lines.append("No series were evaluated (empty report).")
+        lines.append("")
+
+    lines += [
         "| Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | "
         "Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R\u00b2 | Beats Baseline? |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
@@ -568,6 +593,127 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
     return csv_path, md_path
 
 
+# --- P1.6: graduation_count MAE-vs-MAPE reconciliation -----------------------
+
+@dataclass(frozen=True)
+class ReconciliationEntry:
+    """One graduation_count series that failed to beat its baseline (no
+    Prophet champion this cycle) but whose rejection looks harsher in
+    MAPE than in MAE."""
+
+    program_id: str
+    college_id: str
+    prophet_mae: float
+    prophet_mape: Optional[float]
+    best_baseline_mae: float
+
+
+@dataclass(frozen=True)
+class GraduationCountReconciliation:
+    """summarize_graduation_count_reconciliation()'s result: how many
+    graduation_count series without a Prophet champion this cycle, and
+    which of those are MAE-reasonable but MAPE-ugly, at the given
+    thresholds."""
+
+    total_no_champion: int
+    flagged: Tuple[ReconciliationEntry, ...]
+    mae_threshold: float
+    mape_threshold: float
+
+    @property
+    def count(self) -> int:
+        return len(self.flagged)
+
+    def summary_line(self) -> str:
+        """One human-readable sentence for the evaluation report /
+        console output -- mirrors the "N of M" phrasing write_evaluation_report
+        already uses, so both are scannable the same way."""
+        if self.total_no_champion == 0:
+            return "No graduation_count series were without a Prophet champion this run."
+        pct = f"{self.count / self.total_no_champion:.0%}"
+        return (
+            f"{self.count} of {self.total_no_champion} graduation_count series without a "
+            f"Prophet champion ({pct}) are MAE-reasonable (\u2264 {self.mae_threshold:g} students) "
+            f"but MAPE-ugly (> {self.mape_threshold:.0f}%): the absolute miss is small, the "
+            "percentage looks alarming only because graduation counts are small numbers."
+        )
+
+
+def summarize_graduation_count_reconciliation(
+    report_df: pd.DataFrame,
+    mae_threshold: float = 3.0,
+    mape_threshold: float = 25.0,
+) -> GraduationCountReconciliation:
+    """P1.6: quantifies a claim that was previously anecdotal -- that many
+    graduation_count series where Prophet didn't beat the best baseline
+    ("no champion") aren't actually bad forecasts, they're small-number
+    MAPE distortion.
+
+    Why this exists: metrics.mape()'s denominator is the actual value.
+    A single program's graduation_count in a single semester is often a
+    single- or low-double-digit number, so a Prophet MAE of, say, 2
+    students against an actual of 6 reads as a 33% MAPE -- an
+    attention-grabbing percentage produced by a mundane headcount miss.
+    Left unexamined, a reader who scans MAPE first (or the raw
+    "N of M beats baseline" headline) walks away thinking Prophet is
+    failing badly on graduation forecasts, when several of those
+    "failures" are actually small, defensible misses that merely look
+    worse in percentage terms.
+
+    This does NOT change any promotion decision -- MAE (not MAPE) is
+    and remains the sole promotion criterion, in
+    decide_promotion/decide_champion_promotion, and nothing here
+    touches that logic. This function only reclassifies HOW ALARMING
+    the "no champion" rejections are for a reader, and is purely
+    descriptive/reporting -- an honesty aid, not a second acceptance
+    gate.
+
+    Thresholds are judgment calls, not derived constants:
+      - mae_threshold=3.0 (students): "off by a handful of people, not
+        dozens" for this project's typical program sizes.
+      - mape_threshold=25.0 (percent): a MAPE a stakeholder would still
+        call "bad" in isolation, absent this context.
+    Callers evaluating institutions with very different typical program
+    sizes should pass their own thresholds rather than trust these
+    blindly -- see docs/10_Forecasting.md SS8 for the worked rationale.
+    """
+    grad = report_df[report_df["metric"] == "graduation_count"]
+    # "No champion" here means Option A/Task-39 semantics: Prophet's own
+    # walk-forward MAE did not beat the best available baseline for this
+    # series (prophet_beats_best_baseline is False) -- i.e. no Prophet
+    # model was promotable as champion for this series this cycle. This
+    # is independent of Option B's per-cycle multi-algorithm winner
+    # (some baseline naturally "wins" instead); the two live side by
+    # side in model_registry.py, and this function only ever reads the
+    # Prophet-vs-baseline comparison already recorded in report_df.
+    no_champion = grad[~grad["prophet_beats_best_baseline"]]
+
+    flagged_mask = (
+        (no_champion["prophet_mae"] <= mae_threshold)
+        & no_champion["prophet_mape"].notna()
+        & (no_champion["prophet_mape"] > mape_threshold)
+    )
+    flagged_rows = no_champion[flagged_mask]
+
+    entries = tuple(
+        ReconciliationEntry(
+            program_id=row["program_id"],
+            college_id=row["college_id"],
+            prophet_mae=float(row["prophet_mae"]),
+            prophet_mape=None if pd.isna(row["prophet_mape"]) else float(row["prophet_mape"]),
+            best_baseline_mae=float(row["best_baseline_mae"]),
+        )
+        for _, row in flagged_rows.iterrows()
+    )
+
+    return GraduationCountReconciliation(
+        total_no_champion=len(no_champion),
+        flagged=entries,
+        mae_threshold=mae_threshold,
+        mape_threshold=mape_threshold,
+    )
+
+
 if __name__ == "__main__":
     from pipelines.common.settings import get_postgres_settings
     from pipelines.gold.load_gold_to_postgres import build_pipeline_writer_engine
@@ -581,6 +727,11 @@ if __name__ == "__main__":
     beats = int(report["prophet_beats_best_baseline"].sum())
     print(f"Evaluation complete: Prophet beats baseline on {beats}/{len(report)} series.")
     print(f"Report written to {csv_path} and {md_path}")
+
+    # P1.6: surface the MAE-vs-MAPE reconciliation alongside the headline,
+    # so a console reader gets the same context the markdown report does.
+    reconciliation = summarize_graduation_count_reconciliation(report)
+    print(reconciliation.summary_line())
 
     print("Training final models on full history...")
     paths = train_final_models(engine)

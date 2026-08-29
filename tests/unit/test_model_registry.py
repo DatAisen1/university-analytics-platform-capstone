@@ -114,19 +114,30 @@ def test_promotion_decision_diff_is_zero_on_exact_baseline_match():
 
 def test_make_model_version_is_deterministic_and_readable():
     ts = datetime(2026, 8, 2, 14, 5, 1, tzinfo=timezone.utc)
-    version = make_model_version("CICT", "enrollment_count", trained_at=ts)
-    assert version == "CICT_enrollment_count_20260802T140501Z"
+    version = make_model_version("CICT", "enrollment_count", "prophet", trained_at=ts)
+    assert version == "CICT_enrollment_count_prophet_20260802T140501Z"
 
 
 def test_make_model_version_defaults_to_now_and_is_unique_across_calls():
-    v1 = make_model_version("COE", "graduation_count")
-    v2 = make_model_version("COE", "graduation_count")
+    v1 = make_model_version("COE", "graduation_count", "seasonal_naive")
+    v2 = make_model_version("COE", "graduation_count", "seasonal_naive")
     # Not asserting inequality here would be flaky (both could land in
     # the same second) -- instead assert the shape is right and let the
     # timestamp-based module docstring's uniqueness claim stand on the
     # explicit hand-computed case above.
-    assert v1.startswith("COE_graduation_count_")
-    assert v2.startswith("COE_graduation_count_")
+    assert v1.startswith("COE_graduation_count_seasonal_naive_")
+    assert v2.startswith("COE_graduation_count_seasonal_naive_")
+
+
+def test_make_model_version_disambiguates_same_second_different_algorithm():
+    # Option B: uq_model_registry_program_metric_version is UNIQUE on
+    # (program_key, metric, model_version). Two algorithms evaluated for
+    # the same series in the same run, in the same wall-clock second,
+    # must not collide -- this is the regression this test guards against.
+    ts = datetime(2026, 8, 2, 14, 5, 1, tzinfo=timezone.utc)
+    v_prophet = make_model_version("CICT", "enrollment_count", "prophet", trained_at=ts)
+    v_naive = make_model_version("CICT", "enrollment_count", "naive", trained_at=ts)
+    assert v_prophet != v_naive
 
 
 # --- Task 42: should_retrain -------------------------------------------------

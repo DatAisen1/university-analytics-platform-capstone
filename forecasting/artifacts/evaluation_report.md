@@ -1,6 +1,11 @@
 # Forecast Model Evaluation Report
 
-Prophet beats the best baseline on **29 of 74** series (39%).
+Prophet beats the best baseline on **29 of 74** series (39%) overall.
+
+**Breakdown by metric:**
+
+- `enrollment_count`: 29 of 37 (78%)
+- `graduation_count`: 0 of 37 (0%)
 
 | Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R² | Beats Baseline? |
 |---|---|---|---|---|---|---|---|---|---|---|

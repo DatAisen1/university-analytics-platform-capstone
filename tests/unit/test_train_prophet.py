@@ -323,6 +323,199 @@ def test_saved_model_predictions_are_reproducible_across_loads(tmp_path, monkeyp
     assert first_yhat == pytest.approx(second_yhat, abs=1e-9)
 
 
+def _report_row(
+    program_id, college_id, metric, prophet_mae, best_baseline_mae, beats,
+    seasonal_naive_mae=8.0, prophet_mape=None,
+):
+    """Builds one row shaped like evaluate_all_series' output -- just the
+    columns write_evaluation_report / summarize_graduation_count_reconciliation
+    actually read, so these tests stay decoupled from the full evaluation
+    pipeline (and therefore don't need Postgres)."""
+    return {
+        "program_id": program_id,
+        "college_id": college_id,
+        "metric": metric,
+        "prophet_mae": prophet_mae,
+        "prophet_mape": prophet_mape,
+        "naive_mae": best_baseline_mae + 5,
+        "historical_avg_mae": best_baseline_mae + 3,
+        "seasonal_naive_mae": seasonal_naive_mae,
+        "best_baseline_mae": best_baseline_mae,
+        "mae_diff": prophet_mae - best_baseline_mae,
+        "prophet_r2": 0.85,
+        "prophet_beats_best_baseline": beats,
+    }
+
+
+class TestWriteEvaluationReportMetricBreakdown:
+    """P1.5: write_evaluation_report's single combined headline ('29 of
+    74') mixes enrollment_count and graduation_count, which is honest
+    about the total but hides that the two metrics behave very
+    differently. These tests exercise the per-metric breakdown directly
+    with a synthetic DataFrame, so they need no live Postgres."""
+
+    def test_breakdown_reports_each_metric_separately(self, tmp_path):
+        from models.forecasting.train_prophet import write_evaluation_report
+
+        report_df = pd.DataFrame(
+            [
+                # enrollment_count: 2 of 2 beat baseline
+                _report_row("BSCS", "CICT", "enrollment_count", 5.0, 10.0, True),
+                _report_row("BSIT", "CICT", "enrollment_count", 6.0, 9.0, True),
+                # graduation_count: 0 of 1 beat baseline
+                _report_row("BSCS", "CICT", "graduation_count", 12.0, 10.0, False),
+            ]
+        )
+        _, md_path = write_evaluation_report(report_df, artifacts_dir=tmp_path)
+        text = md_path.read_text(encoding="utf-8")
+
+        # Overall headline still present (3 series total, 2 beat baseline).
+        assert "Prophet beats the best baseline on **2 of 3** series" in text
+        # But the breakdown must disaggregate what the headline hides.
+        assert "`enrollment_count`: 2 of 2 (100%)" in text
+        assert "`graduation_count`: 0 of 1 (0%)" in text
+
+    def test_breakdown_is_omitted_gracefully_for_empty_report(self, tmp_path):
+        from models.forecasting.train_prophet import write_evaluation_report
+
+        empty_df = pd.DataFrame(
+            columns=[
+                "program_id", "college_id", "metric", "prophet_mae", "naive_mae",
+                "historical_avg_mae", "seasonal_naive_mae", "best_baseline_mae",
+                "mae_diff", "prophet_r2", "prophet_beats_best_baseline",
+            ]
+        )
+        # Must not raise ZeroDivisionError, same guarantee the original
+        # headline logic already gave the total==0 case.
+        _, md_path = write_evaluation_report(empty_df, artifacts_dir=tmp_path)
+        text = md_path.read_text(encoding="utf-8")
+        assert "Prophet beats the best baseline on **0 of 0** series (N/A)" in text
+        assert "No series were evaluated" in text
+
+    def test_breakdown_percentage_rounds_per_metric_not_from_the_overall_total(self, tmp_path):
+        """Regression guard: a naive implementation might compute each
+        metric's percentage using the OVERALL total instead of that
+        metric's own subtotal, silently under-reporting every metric
+        whose row count differs from the grand total."""
+        from models.forecasting.train_prophet import write_evaluation_report
+
+        report_df = pd.DataFrame(
+            [
+                _report_row("BSCS", "CICT", "enrollment_count", 5.0, 10.0, True),
+                _report_row("BSIT", "CICT", "enrollment_count", 5.0, 10.0, True),
+                _report_row("BSCE", "COE", "enrollment_count", 5.0, 10.0, True),
+                _report_row("BSCS", "CICT", "graduation_count", 12.0, 10.0, False),
+            ]
+        )
+        _, md_path = write_evaluation_report(report_df, artifacts_dir=tmp_path)
+        text = md_path.read_text(encoding="utf-8")
+        # enrollment_count: 3 of 3 -> 100%, computed against its OWN
+        # subtotal (3), not the grand total (4), which would wrongly
+        # read 75%.
+        assert "`enrollment_count`: 3 of 3 (100%)" in text
+        assert "`graduation_count`: 0 of 1 (0%)" in text
+
+
+class TestGraduationCountReconciliation:
+    """P1.6: summarize_graduation_count_reconciliation() quantifies how
+    many graduation_count series without a Prophet champion this cycle
+    are MAE-reasonable but MAPE-ugly (small-number MAPE distortion).
+    All synthetic DataFrames -- no Postgres required."""
+
+    def test_flags_series_that_are_mae_reasonable_but_mape_ugly(self):
+        from models.forecasting.train_prophet import summarize_graduation_count_reconciliation
+
+        report_df = pd.DataFrame(
+            [
+                # No champion, MAE=2 (<=3 default threshold), MAPE=33% (>25% default) -> flagged.
+                _report_row(
+                    "BSCS", "CICT", "graduation_count", prophet_mae=2.0, best_baseline_mae=1.5,
+                    beats=False, prophet_mape=33.0,
+                ),
+                # No champion, but MAE=8 exceeds the threshold -> genuinely bad, not flagged.
+                _report_row(
+                    "BSIT", "CICT", "graduation_count", prophet_mae=8.0, best_baseline_mae=4.0,
+                    beats=False, prophet_mape=40.0,
+                ),
+                # Champion series (beats baseline) -- excluded regardless of MAE/MAPE.
+                _report_row(
+                    "BSCE", "COE", "graduation_count", prophet_mae=1.0, best_baseline_mae=5.0,
+                    beats=True, prophet_mape=50.0,
+                ),
+                # enrollment_count -- wrong metric, must never be considered.
+                _report_row(
+                    "BSCS", "CICT", "enrollment_count", prophet_mae=2.0, best_baseline_mae=1.5,
+                    beats=False, prophet_mape=33.0,
+                ),
+            ]
+        )
+        result = summarize_graduation_count_reconciliation(report_df)
+
+        # 2 graduation_count series had no champion (BSCS, BSIT); only
+        # BSCS clears the "reasonable MAE, ugly MAPE" bar.
+        assert result.total_no_champion == 2
+        assert result.count == 1
+        assert result.flagged[0].program_id == "BSCS"
+        assert "1 of 2" in result.summary_line()
+
+    def test_does_not_flag_when_mape_is_nan(self):
+        """A NaN MAPE (every actual value was 0 across all folds -- see
+        metrics.mape's documented undefined case) must never compare as
+        \"greater than\" the threshold and get flagged; pandas' default
+        NaN-comparison behavior already does the right thing here, but
+        this test exists to keep that behavior from silently regressing."""
+        from models.forecasting.train_prophet import summarize_graduation_count_reconciliation
+
+        report_df = pd.DataFrame(
+            [
+                _report_row(
+                    "BSCS", "CICT", "graduation_count", prophet_mae=1.0, best_baseline_mae=0.5,
+                    beats=False, prophet_mape=float("nan"),
+                ),
+            ]
+        )
+        result = summarize_graduation_count_reconciliation(report_df)
+        assert result.total_no_champion == 1
+        assert result.count == 0
+
+    def test_summary_line_handles_zero_no_champion_series(self):
+        from models.forecasting.train_prophet import summarize_graduation_count_reconciliation
+
+        report_df = pd.DataFrame(
+            [
+                _report_row(
+                    "BSCE", "COE", "graduation_count", prophet_mae=1.0, best_baseline_mae=5.0,
+                    beats=True, prophet_mape=10.0,
+                ),
+            ]
+        )
+        result = summarize_graduation_count_reconciliation(report_df)
+        assert result.total_no_champion == 0
+        assert result.count == 0
+        assert "No graduation_count series were without a Prophet champion" in result.summary_line()
+
+    def test_custom_thresholds_are_respected(self):
+        """A caller with a different tolerance (e.g. a smaller institution
+        where 3 students is already a big miss) can tighten the bar."""
+        from models.forecasting.train_prophet import summarize_graduation_count_reconciliation
+
+        report_df = pd.DataFrame(
+            [
+                _report_row(
+                    "BSCS", "CICT", "graduation_count", prophet_mae=2.0, best_baseline_mae=1.5,
+                    beats=False, prophet_mape=33.0,
+                ),
+            ]
+        )
+        # Default thresholds (mae<=3, mape>25) would flag this row.
+        default_result = summarize_graduation_count_reconciliation(report_df)
+        assert default_result.count == 1
+
+        # Tighter MAE threshold excludes it.
+        tightened = summarize_graduation_count_reconciliation(report_df, mae_threshold=1.0)
+        assert tightened.count == 0
+
+
 def _postgres_available() -> bool:
     from pipelines.common.postgres import get_admin_connection
     try:
