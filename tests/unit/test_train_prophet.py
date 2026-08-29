@@ -56,7 +56,18 @@ class _FakeProphet:
     Prediction is a plain function of the training data, so a bug in
     the save/load path would surface as a MISMATCHED yhat, not just a
     pickling exception.
+
+    P0-A.2: __init__ records whatever kwargs fit_prophet() constructed
+    it with (init_kwargs), rather than ignoring them -- this is what
+    lets test_fit_prophet_passes_explicit_seasonality_config_to_prophet
+    below assert on the ACTUAL constructor call, not just on
+    fit_prophet() returning successfully. A plain dict of simple
+    values here still pickles fine, so this doesn't affect the
+    save/load round-trip tests further down.
     """
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
 
     def fit(self, train_df):
         self._mean_y = float(train_df["y"].mean())
@@ -126,6 +137,12 @@ def test_has_sufficient_history_false_for_sparse_program():
 
 def test_fit_prophet_wraps_training_failures_in_model_training_error(monkeypatch):
     class BrokenProphet:
+        def __init__(self, **kwargs):
+            # Accept fit_prophet's explicit seasonality kwargs (P0-A.1) so
+            # this test still exercises a .fit() failure specifically,
+            # not a constructor-signature mismatch.
+            pass
+
         def fit(self, train_df):
             raise RuntimeError("boom")
 
@@ -136,6 +153,32 @@ def test_fit_prophet_wraps_training_failures_in_model_training_error(monkeypatch
 
     assert exc.value.category.value == "MODEL_TRAINING_ERROR"
     assert "Prophet training failed" in str(exc.value)
+    assert "boom" in str(exc.value)
+
+
+def test_fit_prophet_passes_explicit_seasonality_config_to_prophet(monkeypatch):
+    """P0-A.2 regression test: the specific bug was that fit_prophet()
+    called bare Prophet() and relied on its 'auto' seasonality
+    heuristic, silently NOT producing the fixed order-2 yearly /
+    disabled weekly / disabled daily configuration every doc and this
+    function's own docstring describe (see fit_prophet's docstring for
+    exactly how 'auto' diverges from that on this project's real
+    walk-forward fold sizes). A test that only asserts fit_prophet()
+    returns a usable model -- as every other test in this file already
+    did -- cannot catch that: _FakeProphet's fit/predict happily
+    'succeed' regardless of what it was constructed with. This test
+    inspects the ACTUAL constructor call instead.
+    """
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    train_df = pd.DataFrame({"ds": ["2021-01-01", "2021-07-01"], "y": [10.0, 20.0]})
+
+    model = fit_prophet(train_df)
+
+    assert model.init_kwargs == {
+        "yearly_seasonality": 2,
+        "weekly_seasonality": False,
+        "daily_seasonality": False,
+    }
 
 
 def test_evaluate_all_series_wraps_evaluation_failures_in_model_evaluation_error(monkeypatch):

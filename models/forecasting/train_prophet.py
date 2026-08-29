@@ -260,6 +260,15 @@ def has_sufficient_history(series: pd.DataFrame) -> bool:
     return series["period_ordinal"].nunique() >= MIN_HISTORY_PERIODS
 
 
+# P0-A.1 fix: yearly_seasonality's intended low Fourier order (2), and
+# weekly/daily seasonality's intended disabling, were never actually
+# passed to Prophet() -- see fit_prophet's docstring below for why a
+# bare Prophet() silently did NOT reliably produce this behavior even
+# though it happened to look right on this project's semester-grain
+# data most of the time.
+YEARLY_SEASONALITY_FOURIER_ORDER = 2
+
+
 def fit_prophet(train_df: pd.DataFrame):
     """Fit a Prophet model on a training series. yearly_seasonality is
     enabled with a LOW fourier_order (2, vs. Prophet's default 10) --
@@ -268,10 +277,49 @@ def fit_prophet(train_df: pd.DataFrame):
     amount of seasonal signal available. Weekly/daily seasonality are
     disabled outright: this is semester-grain data, and fitting
     sub-semester seasonality to it is fitting noise by definition.
+
+    P0-A.1 fix (previously a real, undetected bug): a bare `Prophet()`
+    leaves yearly/weekly/daily seasonality on Prophet's own `'auto'`
+    heuristic (`Prophet.set_auto_seasonalities`), NOT on the fixed
+    order-2/disabled/disabled configuration this docstring -- and
+    every project doc -- described. Concretely, on this project's real
+    semester-grain series, 'auto' does not produce the intended
+    behavior consistently:
+      - yearly: 'auto' disables yearly seasonality entirely for any
+        training window under 2 years (the earliest walk-forward
+        folds, which have as little as 1.5 years of history -- exactly
+        the case this docstring's overfitting warning is about), then
+        silently jumps to Prophet's DEFAULT fourier_order=10 (not 2)
+        the moment a series' training window crosses 2 years (later
+        folds, and the final full-history refit) -- the opposite of a
+        stable, intentional order-2 setting, and the highest-order
+        overfitting risk exactly where the most training data exists
+        to make it look deceptively well-fit.
+      - weekly/daily: 'auto' happens to disable both correctly on this
+        project's real data today, because consecutive observations
+        are always >=1 week apart (semester spacing). This is
+        incidental to the data's actual spacing, not a deliberate
+        configuration -- nothing here would stop weekly/daily
+        seasonality from silently re-enabling if a future data source
+        ever had sub-weekly spacing. Disabling both explicitly removes
+        the dependency on that coincidence.
+    Explicitly passing yearly_seasonality=YEARLY_SEASONALITY_FOURIER_ORDER
+    (Prophet accepts a literal Fourier-order int here, not just
+    True/False/'auto' -- see Prophet.parse_seasonality_args) makes the
+    order-2 configuration this project has always documented actually
+    apply on every fold and the final refit, not just on training
+    windows that happen to fall on the 'auto' heuristic's disabled
+    side. See tests/unit/test_train_prophet.py::
+    test_fit_prophet_passes_explicit_seasonality_config_to_prophet for
+    the regression test that would have caught the original gap.
     """
     from prophet import Prophet
     try:
-        model = Prophet()
+        model = Prophet(
+            yearly_seasonality=YEARLY_SEASONALITY_FOURIER_ORDER,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+        )
         model.fit(train_df)
         return model
     except Exception as exc:
