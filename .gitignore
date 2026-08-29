@@ -53,3 +53,5 @@ forecasting/artifacts/*.json
 .vscode/
 .idea/
 *.swp
+
+DS_masterplan.md
