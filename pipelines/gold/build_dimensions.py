@@ -75,6 +75,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from pipelines.common.academic_periods import OBSERVED_ACADEMIC_YEARS, OBSERVED_START_YEAR
 from pipelines.common.metadata import get_connection, record_run
 from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
@@ -84,7 +85,11 @@ DEFAULT_GOLD_STORAGE_PATH = _REPO_ROOT / "warehouse" / "gold_store"
 
 STAGE = "gold_build_dimensions"
 
-ACADEMIC_YEARS = [2021, 2022, 2023]
+# P0 (Dataset Extension): imported from pipelines.common.academic_periods,
+# the single canonical source, instead of a local literal list -- this
+# name is kept (not deleted) since it's referenced throughout this module
+# and in models/forecasting/deploy_forecast.py's docstring.
+ACADEMIC_YEARS = list(OBSERVED_ACADEMIC_YEARS)
 
 # Governed year_level domain and labels. Only years 1-6 are observed in
 # Silver today, but the dimension is intentionally built to cover the full
@@ -187,7 +192,7 @@ def build_dim_calendar(dim_academic_period: pd.DataFrame) -> pd.DataFrame:
     """
     period_key_by = academic_period_key_lookup(dim_academic_period)
     last_year = max(ACADEMIC_YEARS)
-    dates = pd.date_range("2021-01-01", f"{last_year}-12-31", freq="D")
+    dates = pd.date_range(f"{OBSERVED_START_YEAR}-01-01", f"{last_year}-12-31", freq="D")
 
     rows = []
     for date_key, d in enumerate(dates, start=1):

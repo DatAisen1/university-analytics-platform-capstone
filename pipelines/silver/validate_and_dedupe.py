@@ -18,7 +18,8 @@ Business rules implemented here (see docs/05_Medallion_Architecture.md):
      rejects -- this is where that tag finally gets acted on).
   2. An enrollment record's (academic_year, semester_number) must fall
      within the student's valid observed range: not before their cohort
-     entry semester, not after 2024-2.
+     entry semester, not after the observed window's end (see
+     pipelines.common.academic_periods.OBSERVED_END_YEAR).
   3. Cross-entity consistency: a DROPPED enrollment record must have a
      matching dropout event, and vice versa; same for GRADUATED/graduation.
   4. Year-level progression must be mechanically plausible across a
@@ -45,6 +46,7 @@ from typing import Dict, Optional, Tuple
 import duckdb
 import pandas as pd
 
+from pipelines.common.academic_periods import OBSERVED_MAX_PERIOD_ORDINAL, OBSERVED_START_YEAR
 from pipelines.common.metadata import get_connection, record_run
 from pipelines.common.storage import ObjectStorage, load_storage_from_env
 from pipelines.silver.progression_validation import check_year_level_progression
@@ -58,11 +60,23 @@ DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
 
 STAGE = "silver_validate_dedupe"
 
-OBSERVED_SEMESTERS_ORDINAL_MAX = (2024 - 2021) * 2 + 1  # 2024-2 -> ordinal 7 (0-indexed, matches generate_progression)
+# P0 (Dataset Extension) fix: previously hardcoded as
+# `(2024 - 2021) * 2 + 1` and `(academic_year - 2021)` below -- an
+# independently-duplicated, stale copy of the same 2021/2024 year
+# literals ingest_to_bronze.py's OBSERVED_SEMESTERS had (see that file's
+# comment for the pre-P0.4 8-semester-model origin). This copy was more
+# dangerous than that one: it doesn't fail soft. check_semester_within_
+# cohort_range below QUARANTINES any row outside this bound, so once the
+# observed window is extended (2021-2025, this task), a stale max here
+# would have silently quarantined every real 2024/2025 enrollment record
+# as "outside the student's valid cohort range" -- a correctness bug
+# that would have surfaced as a mysterious mass-quarantine, not a crash.
+# Both values now come from the canonical source.
+OBSERVED_SEMESTERS_ORDINAL_MAX = OBSERVED_MAX_PERIOD_ORDINAL
 
 
 def _semester_ordinal(academic_year: int, semester_number: int) -> int:
-    return (academic_year - 2021) * 2 + (semester_number - 1)
+    return (academic_year - OBSERVED_START_YEAR) * 2 + (semester_number - 1)
 
 
 def dedupe_enrollment(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> Tuple[pd.DataFrame, int]:
@@ -101,8 +115,9 @@ def check_semester_within_cohort_range(
     enrollment_df: pd.DataFrame, student_df: pd.DataFrame
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Quarantine enrollment records dated before the student's cohort
-    entry semester, or after the observed window's end (2024-2) -- a
-    record outside that range cannot legitimately describe this student."""
+    entry semester, or after the observed window's end (see
+    OBSERVED_SEMESTERS_ORDINAL_MAX above) -- a record outside that range
+    cannot legitimately describe this student."""
     cohort_by_student = student_df.set_index("student_id")["cohort_academic_year"].to_dict()
 
     def _is_valid(row) -> bool:

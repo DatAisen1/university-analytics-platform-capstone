@@ -24,13 +24,16 @@ One entry point, `deploy_forecasts(engine)`, does this for every
 
 KNOWN LIMITATION (not worked around here -- see
 warehouse/ddl/008_forecast_registry.sql's module docstring for the full
-explanation): the forecasted target period (period_ordinal 6, i.e.
-2024-1) has no corresponding row in gold.dim_academic_period, because
-that dimension is built only from the closed, observed
-ACADEMIC_YEARS = [2021, 2022, 2023] range
-(pipelines/gold/build_dimensions.py). gold.fact_forecast therefore
-stores target_academic_year/target_semester_number/target_period_ordinal
-as plain columns rather than an academic_period_key FK.
+explanation): the forecasted target period (the first period_ordinal past
+the observed window's end) has no corresponding row in
+gold.dim_academic_period, because that dimension is built only from the
+closed, observed ACADEMIC_YEARS range -- pipelines.common.academic_
+periods.OBSERVED_ACADEMIC_YEARS, currently 2021-2025 (10 periods; was
+2021-2023/6 periods before the P0 Dataset Extension task), imported into
+pipelines/gold/build_dimensions.py as ACADEMIC_YEARS. gold.fact_forecast
+therefore stores target_academic_year/target_semester_number/
+target_period_ordinal as plain columns rather than an academic_period_key
+FK.
 
 P1 (Data Science Recovery) fix: every series here is now (program,
 metric), not (college, metric) -- train_prophet.load_series() reads

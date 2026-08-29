@@ -37,17 +37,22 @@ from typing import Dict
 import pandas as pd
 from pandera.pandas import Check, Column, DataFrameSchema
 
+from pipelines.common.academic_periods import OBSERVED_ACADEMIC_YEARS as _CANONICAL_OBSERVED_ACADEMIC_YEARS
+
 # Nullable pandas extension dtypes -- must match clean_entities.py's
 # TARGET_DTYPES exactly, since these schemas validate CLEANING's output.
 _STR = pd.StringDtype()
 _INT = pd.Int64Dtype()
 _BOOL = pd.BooleanDtype()
 
-# Data-driven, not magic numbers: mirrors this project's actual 3-cohort
-# generation window (data_generator/config/volumes.yaml) and the 2
-# semesters/year modeled everywhere else (pipelines/common/
-# academic_periods.SEMESTER_LABELS).
-OBSERVED_ACADEMIC_YEARS = [2021, 2022, 2023]
+# P0 (Dataset Extension): imported from pipelines.common.academic_periods,
+# the single canonical source, rather than re-declared as a local literal
+# list -- this file previously hardcoded its own [2021, 2022, 2023], which
+# would have silently gone stale (still validating a 3-year window) the
+# moment the observed window was extended anywhere else. list(...) here
+# because Check.isin() below is called at import time against this name
+# repeatedly and a plain list is the simplest shape for that.
+OBSERVED_ACADEMIC_YEARS = list(_CANONICAL_OBSERVED_ACADEMIC_YEARS)
 VALID_SEMESTER_NUMBERS = [1, 2]
 VALID_GENDERS = ["Male", "Female"]
 VALID_ADMISSION_TYPES = ["Freshman", "Transferee"]

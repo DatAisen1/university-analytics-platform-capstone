@@ -10,10 +10,13 @@ since there's no valid prior semester before their entry to close it at).
 
 Updated for the Task 23/24 Gold Modeling Fix (dim_academic_year +
 dim_semester snowflake pair collapsed into one denormalized
-dim_academic_period table) and P0.4's correction of the dataset horizon
-from 4 cohorts / 8 periods to the canonical 3 cohorts / 6 periods
-(2021-2022 through 2023-2024). See build_dimensions.py's module docstring
-for the full rationale.
+dim_academic_period table), P0.4's correction of the dataset horizon
+from 4 cohorts / 8 periods to 3 cohorts / 6 periods (2021-2022 through
+2023-2024), and the later P0 Dataset Extension task, which grew the
+canonical horizon again to 5 cohorts / 10 periods (2021-2022 through
+2025-2026). See build_dimensions.py's module docstring and
+pipelines.common.academic_periods (the single canonical source for the
+observed window) for the full rationale.
 """
 
 import pandas as pd
@@ -65,7 +68,10 @@ def dim_program(dim_college):
 # period_ordinal
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("year,sem,expected", [(2021, 1, 0), (2021, 2, 1), (2022, 1, 2), (2023, 2, 5)])
+@pytest.mark.parametrize(
+    "year,sem,expected",
+    [(2021, 1, 0), (2021, 2, 1), (2022, 1, 2), (2023, 2, 5), (2025, 2, 9)],
+)
 def test_period_ordinal(year, sem, expected):
     assert period_ordinal(year, sem) == expected
 
@@ -74,15 +80,19 @@ def test_period_ordinal(year, sem, expected):
 # dim_academic_period / dim_calendar
 # ---------------------------------------------------------------------------
 
-def test_dim_academic_period_has_six_rows_across_three_years(dim_academic_period):
-    """Canonical horizon (P0.4): 3 academic years x 2 semesters = 6 periods,
-    not the old, incorrect 4-cohort / 8-period model."""
-    assert len(dim_academic_period) == 6
-    assert list(dim_academic_period["academic_year"].unique()) == [2021, 2022, 2023]
+def test_dim_academic_period_has_ten_rows_across_five_years(dim_academic_period):
+    """Canonical horizon (P0 Dataset Extension): 5 academic years x 2
+    semesters = 10 periods -- extended from the earlier P0.4 correction's
+    3 years / 6 periods, not the original, incorrect 4-cohort / 8-period
+    model either."""
+    assert len(dim_academic_period) == 10
+    assert list(dim_academic_period["academic_year"].unique()) == [2021, 2022, 2023, 2024, 2025]
     assert set(dim_academic_period["period_label"]) == {
         "2021-2022 \u00b7 1st Semester", "2021-2022 \u00b7 2nd Semester",
         "2022-2023 \u00b7 1st Semester", "2022-2023 \u00b7 2nd Semester",
         "2023-2024 \u00b7 1st Semester", "2023-2024 \u00b7 2nd Semester",
+        "2024-2025 \u00b7 1st Semester", "2024-2025 \u00b7 2nd Semester",
+        "2025-2026 \u00b7 1st Semester", "2025-2026 \u00b7 2nd Semester",
     }
 
 
@@ -93,8 +103,8 @@ def test_dim_academic_period_key_equals_ordinal_plus_one(dim_academic_period):
 def test_dim_calendar_spans_full_range(dim_academic_period):
     calendar = build_dim_calendar(dim_academic_period)
     assert calendar["full_date"].min().isoformat() == "2021-01-01"
-    assert calendar["full_date"].max().isoformat() == "2023-12-31"
-    assert len(calendar) == 1095  # 3 years, no leap year in 2021-2023
+    assert calendar["full_date"].max().isoformat() == "2025-12-31"
+    assert len(calendar) == 1826  # 5 years incl. one leap year (2024)
 
 
 def test_dim_calendar_every_row_has_valid_period_key(dim_academic_period):

@@ -11,9 +11,23 @@ random_seed: 43   # deliberately different from generate_students.py's seed (42)
                    # student generation and progression simulation are independent
                    # random processes and shouldn't share a seed/stream.
 
-# Semester index 0 = 2021-1 ... index 5 = 2023-2 (inclusive). See
-# generate_progression.semester_index_to_label for the mapping.
-max_semester_index: 5
+# Semester index 0 = 2021-1 ... index 9 = 2025-2 (inclusive). See
+# generate_progression.semester_index_to_label for the mapping. Must stay
+# in sync with pipelines.common.academic_periods.OBSERVED_MAX_PERIOD_ORDINAL
+# (the canonical source) -- this file can't import Python, so the value
+# is duplicated here by necessity, not oversight; if the observed window
+# changes again, update both.
+#
+# P0 (Dataset Extension): extended from 5 (6 periods, 2021-2023) to 9
+# (10 periods, 2021-2025). This also resolves a real modeling gap flagged
+# in this module's own docstring: under the old 6-period window, 5-year
+# programs (Architecture, Engineering) could never produce a single
+# natural graduate, since even the 2021 cohort only reached 6 semesters
+# of tenure by the window's end -- short of the 10 semesters a 5-year
+# program needs. With 10 periods, the 2021 cohort now reaches exactly 10
+# semesters of tenure by 2025-2, so 5-year programs can finally graduate
+# students within the observed window for the first time.
+max_semester_index: 9
 
 dropout:
   # Base per-semester dropout probability by year level -- highest in

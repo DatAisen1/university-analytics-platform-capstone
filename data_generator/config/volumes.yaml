@@ -11,10 +11,17 @@ random_seed: 42
 # Number of new (entering) students per academic-year cohort. Slight growth
 # year-over-year to give the enrollment trend something realistic to show
 # in Gold/dashboards, rather than a flat, suspiciously-uniform series.
+#
+# P0 (Dataset Extension): extended to 2024/2025, continuing the same
+# +100/year trend the original 2021-2023 cohorts already established --
+# not a new assumption, just carrying forward the existing pattern rather
+# than inventing a different growth curve for the new years.
 cohort_sizes:
   2021: 1800
   2022: 1900
   2023: 2000
+  2024: 2100
+  2025: 2200
 
 # Share of each cohort assigned to each college. Must sum to 1.0 and every
 # key must exist in configs/colleges.yaml (cross-validated at load time).

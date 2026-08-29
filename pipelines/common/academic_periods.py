@@ -5,6 +5,26 @@ from typing import Tuple
 import math
 
 OBSERVED_START_YEAR = 2021
+
+# P0 (Dataset Extension): the single canonical source for "how many
+# academic years/periods this project observes." Every other module that
+# previously hardcoded its own [2021, 2022, 2023] list, its own "+3"
+# derivation, or (worse) its own independent year literals (e.g.
+# ingest_to_bronze.py's stale `(2021, 2022, 2023, 2024)`, a leftover from
+# the pre-P0.4 8-semester model that was never updated when the calendar
+# was corrected to 6 semesters) must import these three constants instead
+# of re-deriving them. Extending the observed window now only requires
+# changing OBSERVED_YEAR_COUNT here -- every dimension table, schema
+# check, business-rule range check, and data generator config that
+# imports from here follows automatically.
+OBSERVED_YEAR_COUNT = 5  # 2021-2025 (was 3: 2021-2023)
+OBSERVED_ACADEMIC_YEARS: tuple[int, ...] = tuple(
+    range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + OBSERVED_YEAR_COUNT)
+)
+OBSERVED_END_YEAR = OBSERVED_START_YEAR + OBSERVED_YEAR_COUNT - 1  # 2025
+OBSERVED_PERIOD_COUNT = OBSERVED_YEAR_COUNT * 2  # 10 semesters
+OBSERVED_MAX_PERIOD_ORDINAL = OBSERVED_PERIOD_COUNT - 1  # 9 (0-indexed)
+
 SEMESTER_LABELS = ("1st Semester", "2nd Semester")
 YEAR_LEVEL_LABELS = {
     1: "Freshman",
@@ -118,7 +138,7 @@ def academic_year_categorical_dtype(years: list[int] | None = None) -> pd.Catego
         df["academic_year"] = df["academic_year"].astype(academic_year_categorical_dtype())
         df = df.sort_values("academic_year")   # now chronological, not alphabetical
     """
-    years = years or range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)
+    years = years or OBSERVED_ACADEMIC_YEARS
     ordered_labels = [academic_year_label(y) for y in sorted(set(years))]
     return pd.CategoricalDtype(categories=ordered_labels, ordered=True)
 

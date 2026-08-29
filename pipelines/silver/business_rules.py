@@ -54,7 +54,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from pipelines.common.academic_periods import OBSERVED_START_YEAR, SEMESTER_LABELS
+from pipelines.common.academic_periods import OBSERVED_ACADEMIC_YEARS, SEMESTER_LABELS
 from pipelines.common.metadata import get_connection, record_run
 from pipelines.common.storage import ObjectStorage, load_storage_from_env
 
@@ -77,10 +77,13 @@ DEFAULT_SILVER_STORAGE_PATH = _REPO_ROOT / "warehouse" / "silver_store"
 
 STAGE = "silver_business_validation"
 
-# Data-driven, not magic numbers: this project's generator only ever
-# produces 3 cohorts (2021-2023) and 2 semesters/year -- see
-# data_generator/config/volumes.yaml and academic_periods.SEMESTER_LABELS.
-DEFAULT_OBSERVED_ACADEMIC_YEARS: Tuple[int, ...] = tuple(range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3))
+# P0 (Dataset Extension): OBSERVED_ACADEMIC_YEARS now comes directly from
+# pipelines.common.academic_periods -- the single canonical source -- not
+# a locally re-derived `range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)`.
+# The old "+3" was itself a duplicated year constant of exactly the kind
+# this fix collapses: it silently assumed a 3-year window that had to be
+# remembered and kept in sync by hand everywhere it was copied.
+DEFAULT_OBSERVED_ACADEMIC_YEARS: Tuple[int, ...] = OBSERVED_ACADEMIC_YEARS
 DEFAULT_VALID_SEMESTER_NUMBERS: Tuple[int, ...] = tuple(range(1, len(SEMESTER_LABELS) + 1))
 
 # Which count-like columns to non-negativity-check per entity (Task 22's

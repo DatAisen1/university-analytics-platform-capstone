@@ -97,12 +97,24 @@ def test_semester_to_date_matches_dim_calendar_convention():
     assert semester_to_date(2024, 2)[:4] == "2024"
 
 
-def test_period_ordinals_matches_current_six_period_dataset():
-    # Current OBSERVED_ACADEMIC_YEARS = [2021, 2022, 2023] -> 6 periods,
-    # ordinals 0-5 -> this is the exact fold table docs/10_Forecasting.md
-    # Section 5 documents. Same result the old [3, 4, 5] literal gave --
-    # but now derived, not hardcoded.
+def test_period_ordinals_matches_legacy_six_period_dataset():
+    # LEGACY case, kept as regression coverage: OBSERVED_ACADEMIC_YEARS
+    # was [2021, 2022, 2023] (6 periods, ordinals 0-5) before the P0
+    # Dataset Extension task. Same result the old [3, 4, 5] literal
+    # gave -- but derived, not hardcoded, so it kept working unchanged
+    # through the extension below rather than needing a manual update.
     assert derive_test_period_ordinals(5) == [3, 4, 5]
+
+
+def test_period_ordinals_matches_current_ten_period_dataset():
+    # CURRENT case: P0 Dataset Extension grew OBSERVED_ACADEMIC_YEARS to
+    # 2021-2025 (10 periods, ordinals 0-9) -- this is the exact fold
+    # window docs/10_Forecasting.md Section 5 must document post-
+    # extension. This is also the exact scenario
+    # test_period_ordinals_shifts_when_history_grows below was written
+    # to anticipate (see P1.14) -- what was a hypothetical "5th
+    # academic year" test case there is now the live dataset here.
+    assert derive_test_period_ordinals(9) == [7, 8, 9]
 
 
 def test_period_ordinals_always_returns_three_points():
@@ -114,7 +126,10 @@ def test_period_ordinals_shifts_when_history_grows():
     # P1.14: this is the case the old hardcoded literal could NOT
     # handle -- a 5th observed academic year (10 periods, ordinals
     # 0-9) must shift the fold window forward, not silently keep
-    # testing against stale ordinals 3-5.
+    # testing against stale ordinals 3-5. (This scenario is no longer
+    # hypothetical -- see test_period_ordinals_matches_current_ten_
+    # period_dataset above, which asserts the same thing as the now-
+    # live current-dataset case, not just a future-growth simulation.)
     assert derive_test_period_ordinals(9) == [7, 8, 9]
     assert derive_test_period_ordinals(9) != derive_test_period_ordinals(5)
 

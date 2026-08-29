@@ -2,7 +2,7 @@
 data_generator/generators/generate_progression.py
 
 Simulates each student's semester-by-semester journey from their entry
-semester through 2023-2 (or until a terminal outcome), producing:
+semester through 2025-2 (or until a terminal outcome), producing:
   - enrollment records   (one row per student per semester enrolled)
   - graduation events
   - dropout events
@@ -14,25 +14,33 @@ per semester, not one giant all-history file.
 
 IMPORTANT KNOWN LIMITATION (surfaced here deliberately, not buried):
 Every student's simulation STARTS at their cohort's entry semester within
-the observed 2021-2023 window (3 academic years, 6 semesters -- see
-docs/01_Project_Overview.md Section 4). There is no population of students
-who already enrolled *before* 2021 and are continuing into the window (e.g.
-real 2021-1 seniors who started in 2018). That means:
+the observed 2021-2025 window (5 academic years, 10 semesters -- extended
+from the original 2021-2023/6-semester window by the P0 Dataset Extension
+task; see docs/01_Project_Overview.md Section 4). There is no population
+of students who already enrolled *before* 2021 and are continuing into the
+window (e.g. real 2021-1 seniors who started in 2018). That means:
   - 2021-1's simulated population is 100% brand-new entrants -- no
     continuing 2nd/3rd/4th/5th-year students exist on day one, which a
     real university obviously would have.
-  - 4-year programs can only produce a graduate if a student entered in
-    the 2021 cohort AND survives to exactly their 6th semester (2023-2) --
-    the single last semester in the observed window. 5-year programs
-    (Architecture, Engineering) cannot produce ANY natural graduate within
-    this window at all, since even the 2021 cohort only reaches 6 semesters
-    of tenure by 2023-2, short of the 10 semesters a 5-year program needs.
-  - This means observed graduation counts/rates will be far lower, and far
-    more concentrated in 2023-2, than the ~1,500-2,500 events estimated in
-    an earlier draft of docs/08_Faker_Data_Generator.md Section 7 -- that
-    estimate implicitly assumed an ongoing institution with students at
-    every year level already present in 2021-1, which this generator does
-    not simulate.
+  - Under the OLD 6-semester window, 4-year programs could only produce a
+    graduate if a student entered in the 2021 cohort AND survived to
+    exactly their 6th semester (2023-2) -- the single last semester in the
+    observed window -- and 5-year programs (Architecture, Engineering)
+    could produce NO natural graduate at all, since even the 2021 cohort
+    only reached 6 semesters of tenure by 2023-2, short of the 10
+    semesters a 5-year program needs. The extended 10-semester window
+    resolves this for 5-year programs specifically: the 2021 cohort now
+    reaches exactly 10 semesters of tenure by 2025-2, so a 5-year
+    program's on-time 2021 entrants can graduate for the first time.
+    4-year programs now have three possible graduating cohorts (2021,
+    2022, and 2023 entrants, reaching their 8th semester by 2025-2,
+    2024-2, and 2023-2 respectively) instead of one.
+  - This still means observed graduation counts/rates are lower and more
+    concentrated toward the end of the window than a genuinely ongoing
+    institution would show (see docs/08_Faker_Data_Generator.md Section 7
+    for the original estimate this generator does not attempt to match) --
+    the extension narrows this gap but does not eliminate it, since
+    there's still no population of students who entered before 2021.
 See docs/14_Future_Improvements.md for the proposed fix (simulating
 "legacy" pre-2021 entry cohorts as unobserved backstory) and why it's
 deferred rather than silently patched into the probability model to hit

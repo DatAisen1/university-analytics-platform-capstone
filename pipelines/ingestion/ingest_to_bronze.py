@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
-from pipelines.common.academic_periods import academic_year_label, semester_label_from_number
+from pipelines.common.academic_periods import OBSERVED_ACADEMIC_YEARS, academic_year_label, semester_label_from_number
 from pipelines.common.errors import InvalidSchemaError
 from pipelines.common.config import ReferenceData, load_default_reference_data
 from pipelines.common.metadata import get_connection, has_successful_run, record_run, record_success_once
@@ -68,7 +68,19 @@ STAGE = "bronze_ingestion"
 SCHEMA_VALIDATION_STAGE = "bronze_schema_validation"
 
 SEMESTER_SCOPED_ENTITIES = ["enrollment", "graduation", "dropout", "shifter"]
-OBSERVED_SEMESTERS = [(year, sem) for year in (2021, 2022, 2023, 2024) for sem in (1, 2)]
+
+# P0 (Dataset Extension) fix: previously hardcoded as
+# `(2021, 2022, 2023, 2024)` -- a leftover from the pre-P0.4, incorrect
+# 8-semester model (see docs/10_Forecasting.md §1) that was never updated
+# when the calendar was corrected to the 6-semester (2021-2023) window.
+# It didn't crash (the loop below already handles a missing partition as
+# NO_SOURCE_FILE, not an error), but it meant Bronze ingestion silently
+# looked for 2024 data that the documented model said didn't exist --
+# exactly the kind of stale, independently-hardcoded year list this task
+# collapses. Now derived from the single canonical source, so extending
+# the observed window (as this task also does, to 2021-2025) requires no
+# change here at all.
+OBSERVED_SEMESTERS = [(year, sem) for year in OBSERVED_ACADEMIC_YEARS for sem in (1, 2)]
 
 REQUIRED_COLUMNS = {
     "college": ["college_id", "college_name"],
