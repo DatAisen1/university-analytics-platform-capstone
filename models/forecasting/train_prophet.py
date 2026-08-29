@@ -74,6 +74,7 @@ from models.forecasting.baselines import (
     naive_baseline,
     seasonal_naive_baseline,
 )
+from models.forecasting.count_model import fit_and_predict_count_model
 from models.forecasting.metrics import mae, mape, r_squared, rmse
 
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
@@ -332,6 +333,19 @@ def walk_forward_evaluate(
         "naive": {"actual": [], "predicted": []},
         "historical_avg": {"actual": [], "predicted": []},
         "seasonal_naive": {"actual": [], "predicted": []},
+        # P2.1: count_model (Poisson/Negative-Binomial GLM, see
+        # models/forecasting/count_model.py) is only ever fit for
+        # graduation_count -- the ONE metric P1.6's measurement showed a
+        # real, diagnosed problem for (enrollment_count already beats
+        # baseline 78% of the time; there is nothing to fix there). A
+        # series with metric != "graduation_count" leaves this bucket
+        # empty, which produces a NaN MAE downstream -- the same
+        # "no eligible folds" exclusion path seasonal_naive already uses
+        # (see evaluate_all_series and deploy_forecast.py's
+        # algorithm_candidates loop, both of which already skip any
+        # algorithm with a NaN MAE), so no additional plumbing was
+        # needed to keep it out of enrollment_count's comparison.
+        "count_model": {"actual": [], "predicted": []},
     }
 
     for test_key in test_ordinals:
@@ -379,10 +393,47 @@ def walk_forward_evaluate(
             results["seasonal_naive"]["actual"].append(actual)
             results["seasonal_naive"]["predicted"].append(seasonal_pred)
 
+        # P2.1: count_model, gated to graduation_count only -- see the
+        # results dict comment above for why. Wrapped broadly (not just
+        # ValueError) because this calls into statsmodels' numerical
+        # optimizer, whose failure modes on 3-5 data points aren't
+        # limited to the ValueError count_model.py itself raises for
+        # malformed input; any fit failure here should skip this fold
+        # the same way a missing seasonal_naive lookback does, not
+        # abort the whole series' evaluation.
+        if metric == "graduation_count":
+            try:
+                count_fit = fit_and_predict_count_model(train_ordinals, train_values, test_key)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "count_model fit failed for a graduation_count fold (test_key=%s, "
+                    "n_train=%d) -- skipping this fold, not the series",
+                    test_key, len(train_values),
+                )
+            else:
+                results["count_model"]["actual"].append(actual)
+                results["count_model"]["predicted"].append(count_fit.yhat)
+
     return results
 
 
 def compute_metrics_for_model(actual: List[float], predicted: List[float]) -> Dict[str, float]:
+    # P2.1 fix: zero eligible folds (already possible for seasonal_naive
+    # -- a series with no prior-season lookback value -- and now also for
+    # count_model on every enrollment_count row, since it's only ever fit
+    # for graduation_count; see walk_forward_evaluate) must report NaN
+    # for every metric, INCLUDING r2, without calling into numpy on an
+    # empty array. Previously (pre-P2.1) this fell through to
+    # r_squared([], []) -- since ss_tot == ss_res == 0 for two empty
+    # arrays, that returned a misleadingly "perfect" r2 of 1.0 for
+    # "not evaluated," alongside a RuntimeWarning from numpy's
+    # mean-of-empty-slice on every call. That r2 quirk was invisible
+    # before because no caller surfaced a bare seasonal_naive_r2; P2.1
+    # newly exposes count_model_r2 in evaluate_all_series' output, so
+    # the quirk is now visible and worth fixing here rather than
+    # inheriting it for a second algorithm.
+    if len(actual) == 0:
+        return {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan"), "mape": float("nan")}
     result = {"mae": mae(actual, predicted), "rmse": rmse(actual, predicted), "r2": r_squared(actual, predicted)}
     try:
         result["mape"] = mape(actual, predicted)
@@ -416,6 +467,12 @@ def evaluate_all_series(engine) -> pd.DataFrame:
             "prophet_mae", "prophet_rmse", "prophet_mape", "prophet_r2",
             "naive_mae", "historical_avg_mae", "seasonal_naive_mae",
             "best_baseline_mae", "mae_diff", "prophet_beats_best_baseline",
+            # P2.1: reported alongside, NOT folded into best_baseline_mae/
+            # prophet_beats_best_baseline -- count_model is a candidate
+            # algorithm (like Prophet), not a baseline Prophet must beat.
+            # See write_evaluation_report and select_champion_algorithm
+            # (model_registry.py) for where it's actually compared.
+            "count_model_mae", "count_model_rmse", "count_model_mape", "count_model_r2",
         ])
 
     rows = []
@@ -485,6 +542,15 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                     "best_baseline_mae": best_baseline_mae,
                     "mae_diff": mae_diff,
                     "prophet_beats_best_baseline": beats_baseline,
+                    # P2.1: NaN for enrollment_count rows (never fit -- see
+                    # walk_forward_evaluate) and, for graduation_count rows,
+                    # NaN only in the (rare, disclosed) case every fold's
+                    # fit failed -- same NaN-means-"not evaluated" contract
+                    # seasonal_naive_mae already uses.
+                    "count_model_mae": model_metrics["count_model"]["mae"],
+                    "count_model_rmse": model_metrics["count_model"]["rmse"],
+                    "count_model_mape": model_metrics["count_model"]["mape"],
+                    "count_model_r2": model_metrics["count_model"]["r2"],
                 })
 
         return pd.DataFrame(rows)
@@ -568,9 +634,20 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
 
     lines += [
         "| Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | "
-        "Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R\u00b2 | Beats Baseline? |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "Count Model MAE | Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R\u00b2 | Beats Baseline? |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+    # P2.1: count_model_mae is an ADDITIVE column -- present in every
+    # evaluate_all_series() output, but older/synthetic report_df
+    # fixtures built before P2.1 (e.g. hand-rolled test DataFrames) may
+    # not carry it. Checked once, outside the loop, rather than making
+    # every row iteration re-derive "did the caller give us this
+    # column" -- and rendered "n/a" either way a value isn't available:
+    # column absent (not evaluated by this caller) or NaN (evaluated,
+    # but graduation_count with zero successful folds, or an
+    # enrollment_count row -- count_model is only ever fit for
+    # graduation_count, see walk_forward_evaluate).
+    has_count_model_col = "count_model_mae" in report_df.columns
     for _, row in report_df.iterrows():
         flag = "\u2705" if row["prophet_beats_best_baseline"] else "\u26a0\ufe0f NO"
         # seasonal_naive_mae is legitimately NaN for a series with no
@@ -579,12 +656,17 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         seasonal_display = (
             "n/a" if pd.isna(row["seasonal_naive_mae"]) else f"{row['seasonal_naive_mae']:.2f}"
         )
+        if has_count_model_col and pd.notna(row["count_model_mae"]):
+            count_model_display = f"{row['count_model_mae']:.2f}"
+        else:
+            count_model_display = "n/a"
         # P1.24: explicit signed difference alongside the two metrics it
         # was computed from, so acceptance/rejection is traceable from
         # the table itself, not just the boolean flag.
         lines.append(
             f"| {row['program_id']} | {row['college_id']} | {row['metric']} | {row['prophet_mae']:.2f} | "
             f"{row['naive_mae']:.2f} | {row['historical_avg_mae']:.2f} | {seasonal_display} | "
+            f"{count_model_display} | "
             f"{row['best_baseline_mae']:.2f} | {row['mae_diff']:+.2f} | "
             f"{row['prophet_r2']:.3f} | {flag} |"
         )
