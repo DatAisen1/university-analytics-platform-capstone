@@ -72,6 +72,7 @@ from typing import List, Optional
 import pandas as pd
 
 from models.forecasting.baselines import build_deployable_baseline
+from models.forecasting.count_model import build_deployable_count_model
 from models.forecasting.model_registry import (
     AlgorithmResult,
     CandidateMetrics,
@@ -172,12 +173,17 @@ def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: 
     log alongside it. Returns (model, training_record_count) where `model`
     exposes `.predict(future_df) -> DataFrame[yhat, yhat_lower, yhat_upper]`
     regardless of algorithm -- Prophet's own model for 'prophet',
-    baselines.BaselineModel (degenerate interval, see that module's
-    docstring) for anything else.
+    models.forecasting.count_model.CountModel (real Poisson/NB quantile
+    interval, see that module's docstring) for 'count_model', and
+    baselines.BaselineModel (degenerate interval) for anything else.
 
     Raises ValueError only for 'seasonal_naive' with no training value at
     the required prior-season period_ordinal -- the caller
     (deploy_forecasts) is responsible for falling back when that happens.
+    count_model has no equivalent deployment-time failure mode: unlike
+    seasonal_naive's lookback requirement, it always has SOME valid fit
+    (degenerate-zero at worst -- see that module's docstring), so it never
+    needs the same fallback path.
     """
     if algorithm == "prophet":
         train_df = to_prophet_frame(program_series, metric)
@@ -186,6 +192,11 @@ def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: 
 
     period_ordinals = program_series["period_ordinal"].tolist()
     train_values = program_series[metric].tolist()
+
+    if algorithm == "count_model":
+        model = build_deployable_count_model(period_ordinals, train_values, target_period_ordinal)
+        return model, len(train_values)
+
     model = build_deployable_baseline(algorithm, period_ordinals, train_values, target_period_ordinal, SEASON_LENGTH)
     return model, len(train_values)
 

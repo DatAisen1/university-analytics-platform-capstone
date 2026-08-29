@@ -35,6 +35,13 @@ dagster-webserver==1.13.14
 # --- ML / forecasting (Week 3, Day 20) ---
 prophet==1.1.5
 scikit-learn==1.4.2
+scipy==1.17.1             # direct dependency of models/forecasting/count_model.py (Poisson/NB
+                          # prediction-interval quantiles); previously only a transitive dep of
+                          # prophet/scikit-learn -- pinned explicitly now that something in this
+                          # repo imports it directly, per this project's own convention of not
+                          # relying on an unpinned transitive resolution for a real dependency.
+statsmodels==0.15.0       # models/forecasting/count_model.py's Poisson/Negative-Binomial GLM
+                          # (P2.1, docs/21_Option_B_Punchlist.md) -- see that module's docstring
 
 # --- Testing ---
 pytest==8.2.0

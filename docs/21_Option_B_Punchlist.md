@@ -116,3 +116,91 @@ and `model_registry.py` that already referenced them prospectively.
   anything in this punchlist — worth a follow-up correction pass, not
   fixed here to keep this change scoped to Option B and its reporting
   follow-ups.
+
+## P2.1 follow-up: `count_model` (Poisson / Negative Binomial), added to the Option B pool
+
+Measured, not speculative: `forecasting/artifacts/evaluation_report.md`
+showed Prophet beating baseline on 0 of 37 `graduation_count` series
+(vs. 29 of 37 for `enrollment_count`, untouched by this work) — and,
+on the nonzero subset specifically, losing badly (negative R² in the
+double digits), the signature of a Gaussian trend model fit to small
+right-skewed counts. See `docs/10_Forecasting.md` §9 for the full
+writeup.
+
+- [x] **`models/forecasting/count_model.py`** — `[CREATED]`. Poisson GLM
+  with automatic Negative-Binomial fallback under detected
+  overdispersion, degenerate-zero handling, intercept-only fallback for
+  thin folds, a Prophet-shaped `.predict()` adapter
+  (`CountModel`/`build_deployable_count_model`) matching
+  `baselines.BaselineModel`'s pattern.
+- [x] **`models/forecasting/train_prophet.py`** — `[MODIFIED]`. Wired
+  `count_model` into `walk_forward_evaluate` as a new candidate bucket,
+  gated so it's only ever fit when `metric == "graduation_count"`; added
+  `count_model_mae/rmse/mape/r2` columns to `evaluate_all_series`'s
+  output; `write_evaluation_report()`'s markdown table gained a "Count
+  Model MAE" column (additive — renders `n/a` for callers/rows without
+  it, so pre-P2.1 fixtures don't break); fixed a latent bug in
+  `compute_metrics_for_model` where a zero-fold case (pre-existing for
+  `seasonal_naive`, now also relevant for `count_model` on
+  `enrollment_count` rows) silently produced a misleading `r2=1.0` with
+  numpy warnings instead of honest `NaN`.
+- [x] **`models/forecasting/model_registry.py`** — `[MODIFIED]`. Added
+  `count_model` to `ALGORITHM_SIMPLICITY_RANK` at rank 3 (between
+  `historical_avg` and `prophet`) — more machinery than a stored mean,
+  less than Prophet's full decomposition — so it participates correctly
+  in `select_champion_algorithm()`'s tie-break rule, not just its MAE
+  comparison.
+- [x] **`models/forecasting/deploy_forecast.py`** — `[MODIFIED]`.
+  `_build_champion_model` gained a `count_model` dispatch branch calling
+  `build_deployable_count_model`. Without this, a `count_model` win
+  would have fallen through to `build_deployable_baseline` with an
+  unrecognized algorithm name and raised at deploy time — found and
+  fixed before it could happen, not discovered by a failed deploy.
+- [x] **`requirements.txt`** — `[MODIFIED]`. Added `statsmodels==0.15.0`
+  (the GLM/NB fitting library) and `scipy==1.17.1` (Poisson/NB quantile
+  functions) as explicit, pinned, commented dependencies — `scipy` was
+  previously only an unpinned transitive dependency of `prophet`/
+  `scikit-learn`, despite `count_model.py` importing it directly.
+- [x] **`tests/unit/test_count_model.py`** — `[CREATED]`. 12 tests:
+  input validation, the degenerate-all-zero case, intercept-only
+  fallback (both "too few points" and "no ordinal variation" trigger
+  paths), trend extrapolation, a real (not mocked) overdispersion → NB
+  fallback, a mocked forced-NB-failure → graceful Poisson fallback, the
+  deployment adapter's tiling behavior, and a cross-module regression
+  guard asserting `count_model.ALGORITHM_NAME` and
+  `model_registry.ALGORITHM_SIMPLICITY_RANK`'s key for it agree — a
+  silent mismatch there wouldn't error, it would just never let
+  `count_model` win a tie, which is exactly the kind of failure worth a
+  named test rather than trusting convention.
+- [x] **`tests/unit/test_train_prophet.py`** — `[MODIFIED]`. Added
+  `TestCountModelWiring` (4 tests) covering the CONTRACT between
+  `train_prophet.py` and `count_model.py` specifically (not
+  `count_model.py`'s own fitting logic, already covered above): the
+  metric gate is real at runtime, the empty-fold case for
+  `enrollment_count` doesn't crash or misreport, and predictions are
+  non-negative by construction at the `walk_forward_evaluate` call site,
+  not just in `count_model.py`'s own isolated tests.
+- [x] **`docs/10_Forecasting.md`** — `[MODIFIED]`. Added §9
+  ("A Fourth Algorithm: `count_model` for `graduation_count` ('P2.1')"),
+  describing the measurement that justified it, the small-sample design
+  choices, and how it competes inside the existing Option B framework
+  (no new promotion pathway).
+- [x] **`docs/21_Option_B_Punchlist.md`** — `[MODIFIED]` (this section).
+
+### Verification performed
+
+- `tests/unit/test_count_model.py`: **12 passed**, standalone.
+- `tests/unit/test_train_prophet.py`: **35 passed, 5 skipped**
+  (Postgres-gated, expected in an environment without a reachable
+  instance), full file — confirms the new `TestCountModelWiring` class
+  didn't regress anything already in this file.
+- `py_compile` / `ast.parse` clean on every new/modified `.py` file.
+- **Not yet run at the time of writing this section:** the full
+  `pytest tests/` suite (unit + integration + dbt-dependent) against a
+  live Postgres, and a real `dagster job execute -f
+  orchestration/definitions.py -j full_pipeline_job` run to confirm
+  `count_model` can actually win champion selection and deploy end-to-end
+  against real `graduation_count` data, not just pass isolated unit
+  tests. This is the same category of gap the original Option B
+  punchlist above honestly flagged and left open — closing it is the
+  next step, not assumed complete by the unit-level results above.

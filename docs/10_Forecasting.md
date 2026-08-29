@@ -149,5 +149,43 @@ That surfaces a second, more specific honesty gap: on `graduation_count`, when P
 
 Wired into `train_prophet.py`'s `__main__` block: after `write_evaluation_report()` runs, the reconciliation summary line is printed alongside the beats/total headline, so a console run gets the same context a markdown reader gets from the per-metric breakdown. It is deliberately **not** folded into `write_evaluation_report()` itself — that function only reads the columns every caller of `evaluate_all_series()`'s output is guaranteed to have (it doesn't assume a `prophet_mape` column is populated), while the reconciliation function's whole purpose depends on that column. Keeping them separate, additive functions avoids coupling a generic reporting function to a graduation-count-specific interpretation.
 
+## 9. A Fourth Algorithm: `count_model` for `graduation_count` ("P2.1")
+
+### 9.1 The measurement that justified this, not a speculative addition
+
+Section 8 above quantified *how misleading* a `graduation_count` rejection looks under MAPE. Section 9.1 answers a different question: setting MAPE aside entirely, is Prophet's *absolute* (MAE) performance on `graduation_count` actually fine, or actually bad? A real walk-forward run (`forecasting/artifacts/evaluation_report.md`) answered this directly: Prophet beats its baseline on 0 of 37 `graduation_count` series — compared to 29 of 37 (78%) for `enrollment_count`, which is not touched by anything in this section.
+
+That 0% collapses two genuinely different situations that Section 8's reconciliation function doesn't distinguish, because it wasn't built to:
+
+1. **Data-maturity ties.** Many series have an all-zero actual in every walk-forward test fold — a small or new program that hasn't produced a graduating cohort yet within the 6-semester observed window. Every algorithm, including this new one, correctly predicts ~0 here. MAE is 0 for everyone; "no champion" only because nothing beats a tie. **No algorithm choice fixes this** — it is a data-volume limitation (see §2's feature-window discussion), not a model-selection one, and `count_model.py` does not attempt to solve it.
+2. **Genuine model-mismatch, on the nonzero subset.** Here Prophet isn't marginally losing — e.g. `COA-CERT-DRAFT` (Prophet MAE 7.12 vs. best baseline 2.67, R² −17.5) and `COED-CERT-PTE` (Prophet MAE 9.59 vs. 3.15, R² −8.2). An R² this far below zero means Prophet's fitted curve does considerably *worse* than just guessing the training mean — the specific failure signature of fitting a Gaussian-noise, continuous-valued trend+seasonality model to a small, non-negative, integer-valued, right-skewed count series. This is the actual gap a count-respecting model can close.
+
+### 9.2 What was built: `models/forecasting/count_model.py`
+
+A Poisson GLM, with an automatic Negative Binomial refit under detected overdispersion (Pearson χ²/residual-df > 1.5, and only when there are ≥4 training points to estimate the extra dispersion parameter from). Registered under the single algorithm name `count_model` (which of Poisson/NB was actually used is a diagnostic detail on the fit, not a second top-level algorithm identity — see the module's `ALGORITHM_NAME` constant).
+
+Given this project's actual fold sizes (3–5 training points per walk-forward fold, per §5's fold table). the model degrades deliberately rather than chasing precision it can't have:
+
+| Training data shape | Behavior |
+|---|---|
+| All-zero history | Degenerate zero forecast (`yhat=0`, zero-width interval) — no GLM fit attempted at all |
+| < 3 distinct periods, or no `period_ordinal` variation | Intercept-only Poisson (fitted mean = sample mean — the same point forecast `historical_average_baseline` produces, but with real Poisson interval quantiles instead of a degenerate one) |
+| ≥ 3 distinct periods with variation | Poisson GLM with `period_ordinal` as a log-link trend term |
+| Overdispersed (ratio > 1.5) and ≥ 4 points | Negative Binomial refit attempted; any fit failure (non-convergence, degenerate α) silently falls back to the already-computed Poisson result rather than raising — the same fail-soft philosophy `walk_forward_evaluate` already applies to `seasonal_naive`'s missing-lookback case |
+
+Prediction intervals are real Poisson/Negative-Binomial quantiles (10th/90th percentile, matching Prophet's 80% `interval_width`), non-negative by construction — unlike Prophet's Gaussian interval (which `deploy_forecast.py` must clip at zero) and unlike `count_model`'s baseline siblings (which use a deliberately degenerate zero-width interval, since a simple persistence formula has no principled uncertainty to quantify).
+
+**Disclosed limitation, not swept under the rug:** with only 3–5 points, both the trend slope and (especially) the Negative Binomial's dispersion parameter are themselves noisy estimates. A walk-forward MAE difference of a fraction of a graduating student between `count_model` and a baseline is a point estimate, not a precise determination of which is "truly" better — the same epistemic honesty this project already applies to R² at this sample size (§5.1) applies here too.
+
+### 9.3 How it competes — no new promotion pathway
+
+`count_model` is wired in as one more candidate inside the *existing* Option B framework (§7), not a parallel decision path:
+
+- `train_prophet.py::walk_forward_evaluate` fits it once per fold, **gated to `graduation_count` only** — it is never fit for `enrollment_count`, because §9.1's measurement shows no problem there to fix. If a future measurement changes that picture, the honest response is to re-run the measurement, not to assume this model keeps earning its place.
+- `model_registry.ALGORITHM_SIMPLICITY_RANK` places it at rank 3, between `historical_avg` (rank 2) and `prophet` (rank 4) — more machinery than a stored mean (it fits 2–3 real parameters), less than Prophet's full trend+seasonality decomposition. On an exact MAE tie, the simpler model still wins, per §7's Occam's-razor rule.
+- `deploy_forecast._build_champion_model` dispatches to `count_model.build_deployable_count_model` when it wins, refitting on full history exactly like the Prophet and baseline paths already do.
+
+It earns champion status the same way every other algorithm does: by winning `select_champion_algorithm()` on measured walk-forward MAE. Nothing about this addition changes §5's acceptance criteria or §7.2's promotion contract.
+
 ---
 *Next: `11_Data_Consumption_Contract.md` — the published interface between this service and the Web Team.*

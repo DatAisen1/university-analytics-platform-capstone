@@ -448,14 +448,17 @@ class AlgorithmResult:
 # within floating-point precision -- lower rank wins. Ordered by how much
 # machinery each needs to produce its prediction: naive needs one stored
 # value, seasonal_naive needs one prior-season value, historical_avg needs
-# the full training mean, prophet fits a full model. Not in
+# the full training mean, count_model fits a 2-3 parameter GLM (intercept
+# +trend, +dispersion under NB), prophet fits a full trend+seasonality
+# model with many more effective parameters. Not in
 # baselines.BASELINE_ALGORITHMS order because that tuple is unordered by
 # design; this ranking is a deliberate, separate decision.
 ALGORITHM_SIMPLICITY_RANK = {
     "naive": 0,
     "seasonal_naive": 1,
     "historical_avg": 2,
-    "prophet": 3,
+    "count_model": 3,
+    "prophet": 4,
 }
 
 

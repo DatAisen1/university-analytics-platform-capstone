@@ -25,6 +25,7 @@ import pytest
 from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
 from models.forecasting.train_prophet import (
     MIN_HISTORY_PERIODS,
+    compute_metrics_for_model,
     evaluate_all_series,
     fit_prophet,
     has_sufficient_history,
@@ -33,6 +34,7 @@ from models.forecasting.train_prophet import (
     semester_to_date,
     derive_test_period_ordinals,
     to_prophet_frame,
+    walk_forward_evaluate,
 )
 TEST_ENV = {
     "POSTGRES_HOST": os.environ.get("TEST_POSTGRES_HOST", "localhost"),
@@ -514,6 +516,84 @@ class TestGraduationCountReconciliation:
         # Tighter MAE threshold excludes it.
         tightened = summarize_graduation_count_reconciliation(report_df, mae_threshold=1.0)
         assert tightened.count == 0
+
+
+# --- P2.1: count_model wiring into walk_forward_evaluate / evaluate_all_series ---
+
+class TestCountModelWiring:
+    """Integration-level tests for the count_model <-> train_prophet
+    wiring specifically -- models/forecasting/test_count_model.py already
+    covers count_model.py's own fitting logic in isolation; these tests
+    cover the CONTRACT between the two modules: is count_model actually
+    invoked when it should be, and correctly absent (not erroring) when
+    it shouldn't be. Every fixture value and expected shape below was
+    confirmed against a real walk_forward_evaluate() run before being
+    written as an assertion here (see this session's development notes),
+    not assumed from reading the gating code alone."""
+
+    @staticmethod
+    def _series(graduation_values, enrollment_values=None):
+        n = len(graduation_values)
+        dates = pd.date_range("2021-01-01", periods=n, freq="6MS").strftime("%Y-%m-%d").tolist()
+        data = {
+            "period_ordinal": list(range(n)),
+            "ds": dates,
+            "graduation_count": graduation_values,
+        }
+        if enrollment_values is not None:
+            data["enrollment_count"] = enrollment_values
+        return pd.DataFrame(data)
+
+    def test_count_model_is_populated_for_graduation_count(self):
+        series = self._series([0.0, 1.0, 0.0, 2.0, 1.0, 3.0])
+        result = walk_forward_evaluate(series, "graduation_count")
+        assert "count_model" in result
+        # 3 walk-forward folds (derive_test_period_ordinals default), each
+        # contributing one point -- confirms it's genuinely being fit per
+        # fold, not just present as an empty key.
+        assert len(result["count_model"]["actual"]) == 3
+        assert len(result["count_model"]["predicted"]) == 3
+
+    def test_count_model_is_never_fit_for_enrollment_count(self):
+        """The P2.1 gate (models/forecasting/count_model.py's module
+        docstring: 'gated to graduation_count only... enrollment_count
+        already has Prophet beating baseline 78% of the time') must
+        actually hold at runtime, not just be documented intent. The key
+        is still present (dict shape stays uniform across metrics -- see
+        walk_forward_evaluate's `results` initialization), but must be
+        empty, never populated with real predictions for this metric."""
+        series = self._series(
+            graduation_values=[0.0] * 6,
+            enrollment_values=[100, 110, 105, 120, 115, 130],
+        )
+        result = walk_forward_evaluate(series, "enrollment_count")
+        assert "count_model" in result
+        assert result["count_model"]["actual"] == []
+        assert result["count_model"]["predicted"] == []
+
+    def test_compute_metrics_for_model_on_ungated_count_model_returns_nan_not_error(self):
+        """The exact input evaluate_all_series produces for count_model
+        when it's metric-gated off (previous test's empty-list case) must
+        not crash, and must not silently report a misleading r2=1.0 --
+        the latent bug docs/21_Option_B_Punchlist.md's P2.1 follow-up
+        fixed (compute_metrics_for_model previously mishandled this same
+        empty-fold shape for seasonal_naive)."""
+        metrics = compute_metrics_for_model([], [])
+        assert pd.isna(metrics["mae"])
+        assert pd.isna(metrics["rmse"])
+        assert pd.isna(metrics["r2"])
+        assert pd.isna(metrics["mape"])
+
+    def test_count_model_predictions_are_non_negative(self):
+        """A structural property, not a coincidence of the specific test
+        data: count_model.py's own docstring guarantees non-negative
+        Poisson/NB quantiles by construction (no clipping needed, unlike
+        Prophet's Gaussian interval) -- this is the regression guard that
+        keeps that guarantee true at the walk_forward_evaluate call site
+        too, not just in count_model.py's own unit tests."""
+        series = self._series([0.0, 5.0, 0.0, 8.0, 2.0, 12.0])
+        result = walk_forward_evaluate(series, "graduation_count")
+        assert all(p >= 0.0 for p in result["count_model"]["predicted"])
 
 
 def _postgres_available() -> bool:
