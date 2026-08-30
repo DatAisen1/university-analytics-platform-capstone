@@ -100,9 +100,14 @@ def test_mart_executive_summary_has_one_row_per_semester():
         cur.execute("SELECT COUNT(*), COUNT(DISTINCT academic_period_key) FROM marts.mart_executive_summary")
         total, distinct = cur.fetchone()
     conn.close()
-    # 6-period canonical grain (3 academic years x 2 semesters) -- see
-    # pipelines/gold/build_dimensions.py's ACADEMIC_YEARS / P0.4.
-    assert total == distinct == 6
+    # 10-period canonical grain (5 academic years x 2 semesters, 2021-2025
+    # extended dataset) -- see pipelines/gold/build_dimensions.py's
+    # ACADEMIC_YEARS. Verified against a real fresh pipeline run, not
+    # assumed from the config: SELECT COUNT(*), COUNT(DISTINCT
+    # academic_period_key) FROM marts.mart_executive_summary returned
+    # 10, 10 (previously 6, 6 under the 2021-2023 window this test was
+    # originally written against).
+    assert total == distinct == 10
 
 
 @pytest.mark.skipif(not _marts_exist(), reason="Marts must be built first -- run `dbt run` before this test")

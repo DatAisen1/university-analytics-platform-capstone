@@ -106,7 +106,23 @@ YEAR_LEVEL_LABELS: Dict[int, str] = {
     4: "Senior",
     5: "Fifth Year",
     6: "Sixth Year",
+    7: "Seventh Year",
 }
+# Domain must cover the data generator's actual configured ceiling:
+# max(nominal_duration_years across configs/programs.yaml) + progression_rules.yaml's
+# max_year_level_cap_extra_years. Verified directly, not assumed: as of
+# the 2021-2025 extended dataset, that's 5 (the four 5-year programs --
+# Architecture, Civil/Electrical/Mechanical Engineering) + 2 = 7. This
+# ceiling is a MAX of two independently-configured values in two
+# different YAML files (configs/programs.yaml per-program, this repo's
+# data_generator/config/progression_rules.yaml globally) -- there is no
+# single source of truth enforcing they stay in sync, so if either
+# config changes (a longer program is added, or the extra-years cap is
+# raised), this dict must be re-verified against both, not assumed
+# still correct. A student exceeding this domain fails loudly at the
+# gold stage (see build_facts.py's fact_enrollment year_level check)
+# rather than being silently dropped -- that failure is what surfaced
+# this exact gap being one year too narrow.
 
 # Governed gender domain, matching pipelines/silver/clean_entities.py's
 # VALID_GENDERS controlled vocabulary. Defined once, here, as the single

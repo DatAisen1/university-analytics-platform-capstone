@@ -94,9 +94,36 @@ def test_clear_upward_trend_extrapolates_above_the_historical_average():
     # historical average (2.5) -- this is the entire reason a trend term
     # exists rather than always falling back to intercept-only.
     result = fit_and_predict_count_model([0, 1, 2, 3], [1.0, 2.0, 3.0, 4.0], target_period_ordinal=4)
-    assert result.detail == "poisson_glm"
-    assert result.yhat > 5.0  # observed real value: ~6.41
+    assert result.detail == "poisson_glm(extrapolation-capped)"  # capped at 4+2*1=6, from an uncapped 6.41
+    assert result.yhat > 5.0  # observed real value: 6.0 (capped from an uncapped 6.41 -- see the extrapolation guardrail in count_model.py)
     assert result.yhat_lower < result.yhat < result.yhat_upper
+
+
+def test_step_change_series_extrapolation_is_capped_not_explosive():
+    """Regression test for a real, severe bug found running this against
+    live data (P0 gate follow-up, CICT-BSIT-DB's actual
+    graduation_count series). A program's first graduating cohort
+    produces exactly this shape: many zero periods, then a sudden jump.
+    Before the extrapolation guardrail was added, a log-link GLM
+    extrapolating this ONE period past training predicted yhat=460 --
+    a ~14x blowup over the training max of 33, and yhat_upper=1079 --
+    genuinely unusable numbers that were silently corrupting the real
+    evaluation_report.md this project generates. The fix must land
+    strictly below the training max plus twice the largest observed
+    single-period jump (33 + 2*21 = 75), not just "somewhat lower than
+    460" -- a partial fix that still overshoots by 5x would pass a
+    vague assertion and still be wrong."""
+    result = fit_and_predict_count_model(
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 21.0, 21.0, 33.0],
+        target_period_ordinal=10,
+    )
+    assert result.yhat <= 75.0
+    assert result.yhat_upper <= 130.0  # generous slack above yhat, still nowhere near the real 1079
+    assert "extrapolation-capped" in result.detail
+    # The underlying algorithm choice (NB, given real overdispersion here)
+    # must still be visible in detail, not overwritten by the cap note.
+    assert result.detail.startswith("negative_binomial_glm")
 
 
 # --- Overdispersion -> Negative Binomial fallback ---
@@ -142,7 +169,7 @@ def test_deployable_count_model_predict_tiles_the_single_forecast():
     assert list(out.columns) == ["yhat", "yhat_lower", "yhat_upper"]
     assert len(out) == 3
     assert out["yhat"].nunique() == 1
-    assert out["yhat"].iloc[0] == pytest.approx(6.41, abs=0.01)  # observed real value
+    assert out["yhat"].iloc[0] == pytest.approx(6.0, abs=0.01)  # observed real value (capped from an uncapped 6.41)
 
 
 def test_deployable_count_model_on_all_zero_history_deploys_zero_forecast():

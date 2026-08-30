@@ -266,6 +266,37 @@ def fit_and_predict_count_model(
     mu_hat = float(fit_result.predict(target_design)[0])
     mu_hat = max(mu_hat, 0.0)
 
+    # Extrapolation guardrail, trend branch only (intercept-only's mu_hat
+    # is the fitted mean regardless of target_period_ordinal -- it cannot
+    # blow up this way, so it's structurally exempt). A log-link GLM
+    # fit to a step-change series -- the exact real shape a program's
+    # first graduating cohort produces: [0,0,0,0,0,0,0,21,21,33] -- finds
+    # a large slope explaining that jump, and extrapolating a log-linear
+    # slope even ONE period past training compounds exponentially. Found
+    # running this against real data (CICT-BSIT-DB, P0 gate follow-up):
+    # raw mu_hat=460 against a training max of 33 -- a ~14x blowup, not a
+    # plausible forecast by any reading.
+    #
+    # The cap is grounded in the series' OWN observed volatility, not an
+    # arbitrary global constant, so it scales correctly across programs
+    # of very different sizes: the model may predict at most the highest
+    # value already observed, plus twice the largest single-period jump
+    # already observed. A program that has already jumped from 0 to 33
+    # graduates in one period gets real headroom to predict a similarly
+    # large jump again; a program whose counts have only ever moved by 1
+    # or 2 does not get to claim a 400-point swing is plausible.
+    #
+    # Verified this doesn't meaningfully disturb legitimate smooth-trend
+    # cases: a [1,2,3,4] series (max_jump=1) caps at 4+2=6, against an
+    # uncapped fit of ~6.41 -- a negligible, appropriately conservative
+    # difference, not a distortion of a reasonable forecast.
+    if use_trend:
+        max_jump = float(np.max(np.abs(np.diff(y))))
+        extrapolation_cap = float(np.max(y)) + 2.0 * max(max_jump, 1.0)
+        if mu_hat > extrapolation_cap:
+            mu_hat = extrapolation_cap
+            detail = f"{detail}(extrapolation-capped)"
+
     if detail == "negative_binomial_glm":
         alpha = float(fit_result.params[-1])
         var_hat = mu_hat + alpha * mu_hat ** 2
