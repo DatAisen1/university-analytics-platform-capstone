@@ -191,6 +191,20 @@ def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: 
     if algorithm == "prophet":
         train_df = to_prophet_frame(program_series, metric)
         model = fit_prophet(train_df)
+        # P0 Gate Follow-Up 22.1: fit_prophet attaches whether this
+        # deployed model's interval is genuinely MCMC-calibrated or a
+        # disclosed MAP-only fallback (model._interval_calibration).
+        # Logged here so it's visible in deploy_forecasts' output today;
+        # NOT YET persisted onto gold.fact_forecast itself -- that needs
+        # a schema column and migration, tracked as open follow-up in
+        # docs/22_Interval_Calibration_Resolution.md, not done in this
+        # change so this diff stays reviewable against a real database.
+        calibration = getattr(model, "_interval_calibration", None)
+        if calibration is not None and not calibration.calibrated:
+            logger.info(
+                "%s/%s deployed forecast interval NOT MCMC-calibrated: %s",
+                metric, algorithm, calibration.reason,
+            )
         return model, len(train_df)
 
     period_ordinals = program_series["period_ordinal"].tolist()

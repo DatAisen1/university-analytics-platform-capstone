@@ -96,6 +96,55 @@ MIN_HISTORY_PERIODS = 4
 # seasonal_naive_baseline to find "the same semester one year prior."
 SEASON_LENGTH = 2
 
+# P0 Gate Follow-Up 22.1 (docs/22_Interval_Calibration_Resolution.md):
+# Prophet's default mcmc_samples=0 only propagates trend-changepoint
+# uncertainty into yhat_lower/yhat_upper, not observation-noise
+# uncertainty -- on this project's real fold sizes, a live-regenerated
+# evaluation_report.md showed the true value missed the stated 80%
+# interval in ALL 3 walk-forward folds for 72% of series (53/74). Full
+# MCMC sampling (mcmc_samples>0) fixes that statistically, but a
+# from-scratch benchmark against this project's actual fold sizes (3-9
+# training points, semester-grain) showed MCMC itself is unreliable at
+# the small end: repeated fits at n=3-5 training points showed 5-46%
+# divergent transitions per chain (and twice, non-fatal Stan numerical
+# errors -- "Matrix of independent variables is inf", "Scale vector is
+# 0"), while n>=7 showed 0% divergence across 9 varied trials (different
+# trends/noise levels). A sampler with double-digit divergence hasn't
+# actually explored the posterior -- per Stan's own diagnostics
+# guidance, ANY divergent transition means the result is suspect, not
+# just a high divergence rate -- so turning MCMC on everywhere would
+# trade one kind of miscalibrated interval for another.
+#
+# Hybrid resolution, implemented in fit_prophet(): attempt full Bayesian
+# sampling only once a series' training window reaches
+# MCMC_MIN_TRAIN_POINTS, and ALWAYS verify convergence afterward via
+# CmdStan's own per-chain divergence count rather than trusting the size
+# threshold alone. A fit below the threshold, or one that diverges
+# despite clearing it, falls back to the fast MAP-only fit
+# (mcmc_samples=0) and is explicitly flagged NOT calibrated -- see
+# IntervalCalibration below -- so nothing downstream mistakes a
+# disclosed interval for a statistically calibrated one.
+MCMC_SAMPLES = 300
+MCMC_MIN_TRAIN_POINTS = 7
+
+
+@dataclass
+class IntervalCalibration:
+    """Attached to a fitted Prophet model as `model._interval_calibration`
+    (see fit_prophet). Records whether that model's yhat_lower/yhat_upper
+    came from genuine Bayesian sampling (`calibrated=True`,
+    `method="bayesian_mcmc"`) or a disclosed MAP-only approximation
+    (`calibrated=False`, `method="map_disclosed"`, with `reason`
+    explaining which fallback path triggered). Consumers that need to
+    know whether a given forecast's interval is trustworthy (evaluation
+    reporting, and eventually gold.fact_forecast -- see
+    docs/22_Interval_Calibration_Resolution.md's Follow-up section for
+    what's not yet wired through) should read this rather than assume
+    every Prophet interval means the same thing."""
+    calibrated: bool
+    method: str  # "bayesian_mcmc" or "map_disclosed"
+    reason: str = ""
+
 
 def derive_test_period_ordinals(max_period_ordinal: int) -> List[int]:
     """P1.14 fix: the 3 walk-forward test points, DERIVED from the
@@ -314,21 +363,88 @@ def fit_prophet(train_df: pd.DataFrame):
     side. See tests/unit/test_train_prophet.py::
     test_fit_prophet_passes_explicit_seasonality_config_to_prophet for
     the regression test that would have caught the original gap.
+
+    P0 Gate Follow-Up 22.1: the returned model also carries
+    `model._interval_calibration` (an IntervalCalibration instance, see
+    above) recording whether yhat_lower/yhat_upper came from real MCMC
+    sampling or a disclosed MAP-only fallback. This is attached as an
+    attribute rather than via a changed return type specifically so
+    every existing `model = fit_prophet(train_df)` call site keeps
+    working unmodified -- callers that care read the attribute; callers
+    that don't (most of them: they just need a `.predict()`-able model)
+    are unaffected.
     """
     from prophet import Prophet
-    try:
-        model = Prophet(
+
+    n_train = len(train_df)
+
+    def _map_fit(reason: str):
+        m = Prophet(
             yearly_seasonality=YEARLY_SEASONALITY_FOURIER_ORDER,
             weekly_seasonality=False,
             daily_seasonality=False,
         )
+        m.fit(train_df)
+        m._interval_calibration = IntervalCalibration(
+            calibrated=False, method="map_disclosed", reason=reason,
+        )
+        return m
+
+    try:
+        if n_train < MCMC_MIN_TRAIN_POINTS:
+            return _map_fit(
+                f"training window too short for stable MCMC sampling "
+                f"({n_train} < {MCMC_MIN_TRAIN_POINTS} points) -- see "
+                f"MCMC_MIN_TRAIN_POINTS"
+            )
+
+        model = Prophet(
+            yearly_seasonality=YEARLY_SEASONALITY_FOURIER_ORDER,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            mcmc_samples=MCMC_SAMPLES,
+        )
         model.fit(train_df)
+
+        divergent_count = _mcmc_divergent_transitions(model)
+        if divergent_count is None:
+            model._interval_calibration = IntervalCalibration(
+                calibrated=False, method="map_disclosed",
+                reason="could not read MCMC convergence diagnostics from "
+                       "this Prophet/CmdStanPy version -- treated as "
+                       "unverified rather than assumed fine",
+            )
+            return model
+        if divergent_count > 0:
+            return _map_fit(
+                f"MCMC sampling diverged ({divergent_count} divergent "
+                f"transition(s) across chains) despite {n_train} training "
+                f"points -- falling back to MAP rather than trusting an "
+                f"unconverged posterior"
+            )
+
+        model._interval_calibration = IntervalCalibration(
+            calibrated=True, method="bayesian_mcmc",
+        )
         return model
     except Exception as exc:
         raise ModelTrainingError(
             f"Prophet training failed: {exc}", stage="Model Training",
-            rows_affected=len(train_df),
+            rows_affected=n_train,
         ) from exc
+
+
+def _mcmc_divergent_transitions(model) -> Optional[int]:
+    """Total divergent-transition count across all chains for an
+    MCMC-sampled Prophet model, or None if this Prophet/CmdStanPy
+    version doesn't expose the diagnostic where we expect it. Kept as
+    its own function so it can be monkeypatched in tests without a real
+    CmdStan backend."""
+    try:
+        divergences = model.stan_backend.stan_fit.divergences
+        return int(sum(divergences))
+    except (AttributeError, TypeError):
+        return None
 
 
 def predict_point(model, ds: str) -> float:
@@ -393,7 +509,13 @@ def walk_forward_evaluate(
         test_ordinals = derive_test_period_ordinals(int(series["period_ordinal"].max()))
 
     results: Dict[str, Dict[str, List[float]]] = {
-        "prophet": {"actual": [], "predicted": [], "lower": [], "upper": []},
+        # "interval_calibrated" (P0 Gate Follow-Up 22.1): one bool per
+        # fold, True only when that fold's Prophet interval came from
+        # genuine converged MCMC sampling (see fit_prophet /
+        # IntervalCalibration). Only "prophet" has this key -- baselines
+        # and count_model have their own, already-disclosed interval
+        # policies unrelated to Prophet's MCMC question.
+        "prophet": {"actual": [], "predicted": [], "lower": [], "upper": [], "interval_calibrated": []},
         "naive": {"actual": [], "predicted": [], "lower": [], "upper": []},
         "historical_avg": {"actual": [], "predicted": [], "lower": [], "upper": []},
         "seasonal_naive": {"actual": [], "predicted": [], "lower": [], "upper": []},
@@ -424,6 +546,10 @@ def walk_forward_evaluate(
         train_prophet_df = to_prophet_frame(train, metric)
         model = fit_prophet(train_prophet_df)
         prophet_pred, prophet_lower, prophet_upper = predict_interval(model, test_ds)
+        calibration = getattr(model, "_interval_calibration", None)
+        results["prophet"]["interval_calibrated"].append(
+            calibration.calibrated if calibration is not None else False
+        )
 
         train_values = train[metric].tolist()
         naive_pred = naive_baseline(train_values)
@@ -582,6 +708,7 @@ def evaluate_all_series(engine) -> pd.DataFrame:
             "prophet_mean_interval_width", "prophet_normalized_interval_width",
             "count_model_coverage_hits", "count_model_coverage_n",
             "count_model_mean_interval_width", "count_model_normalized_interval_width",
+            "prophet_interval_calibrated_folds", "prophet_interval_total_folds",
         ])
 
     rows = []
@@ -681,6 +808,21 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                     "count_model_coverage_n": model_metrics["count_model"]["coverage_n"],
                     "count_model_mean_interval_width": model_metrics["count_model"]["mean_interval_width"],
                     "count_model_normalized_interval_width": model_metrics["count_model"]["normalized_interval_width"],
+                    # P0 Gate Follow-Up 22.1: how many of this row's
+                    # prophet_coverage_n folds actually got a genuine
+                    # MCMC-calibrated interval vs. a disclosed MAP-only
+                    # one -- see fit_prophet/IntervalCalibration. Lets a
+                    # reader of the coverage columns above tell "coverage
+                    # measured against a calibrated interval" apart from
+                    # "coverage measured against a disclosed one" instead
+                    # of assuming every prophet_coverage_* row means the
+                    # same thing.
+                    "prophet_interval_calibrated_folds": sum(
+                        fold_results["prophet"]["interval_calibrated"]
+                    ),
+                    "prophet_interval_total_folds": len(
+                        fold_results["prophet"]["interval_calibrated"]
+                    ),
                 })
 
         return pd.DataFrame(rows)
@@ -709,6 +851,12 @@ def train_final_models(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> L
         for metric in TARGET_METRICS:
             train_df = to_prophet_frame(program_series, metric)
             model = fit_prophet(train_df)
+            calibration = getattr(model, "_interval_calibration", None)
+            if calibration is not None and not calibration.calibrated:
+                logging.getLogger(__name__).info(
+                    "%s/%s final refit: interval NOT MCMC-calibrated (%s)",
+                    program_id, metric, calibration.reason,
+                )
             path = artifacts_dir / f"{program_id}_{metric}_prophet.pkl"
             with path.open("wb") as f:
                 pickle.dump(model, f)
@@ -762,11 +910,36 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         lines.append("No series were evaluated (empty report).")
         lines.append("")
 
+    # P0 Gate Follow-Up 22.1: aggregate calibration summary, ahead of the
+    # per-series table -- a reader should know up front how many of the
+    # 80% Interval Coverage numbers below came from a genuinely
+    # MCMC-calibrated interval vs. a disclosed MAP-only one, rather than
+    # discovering it column-by-column. Guarded for older report_df
+    # fixtures built before this column existed.
+    has_calibration_cols = (
+        "prophet_interval_calibrated_folds" in report_df.columns
+        and "prophet_interval_total_folds" in report_df.columns
+    )
+    if total and has_calibration_cols:
+        calibrated_folds = int(report_df["prophet_interval_calibrated_folds"].sum())
+        total_folds = int(report_df["prophet_interval_total_folds"].sum())
+        calib_pct = f"{calibrated_folds / total_folds:.0%}" if total_folds else "N/A"
+        lines.append(
+            f"**Interval calibration:** {calibrated_folds} of {total_folds} Prophet "
+            f"walk-forward folds ({calib_pct}) got a genuine MCMC-calibrated 80% "
+            f"interval; the rest fell back to a disclosed MAP-only approximation "
+            f"(training window below `MCMC_MIN_TRAIN_POINTS`, or MCMC sampling "
+            f"diverged -- see `fit_prophet`/`IntervalCalibration`). Coverage figures "
+            f"below apply to whichever interval each fold actually got."
+        )
+        lines.append("")
+
     lines += [
         "| Program | College | Metric | Prophet MAE | Prophet RMSE | 80% Interval Coverage | "
-        "Mean Interval Width | Normalized Width | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | "
-        "Count Model MAE | Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R\u00b2 | Beats Baseline? |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "Mean Interval Width | Normalized Width | Interval Calibration | Naive MAE | Hist. Avg MAE | "
+        "Seasonal Naive MAE | Count Model MAE | Best Baseline MAE | Diff (Prophet - Baseline) | "
+        "Prophet R\u00b2 | Beats Baseline? |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     # P2.1: count_model_mae is an ADDITIVE column -- present in every
     # evaluate_all_series() output, but older/synthetic report_df
@@ -805,12 +978,20 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
             "n/a" if pd.isna(row["prophet_normalized_interval_width"])
             else f"{row['prophet_normalized_interval_width']:.2f}"
         )
+        if has_calibration_cols and row["prophet_interval_total_folds"]:
+            calibration_display = (
+                f"{int(row['prophet_interval_calibrated_folds'])}/"
+                f"{int(row['prophet_interval_total_folds'])} MCMC"
+            )
+        else:
+            calibration_display = "n/a"
         # P1.24: explicit signed difference alongside the two metrics it
         # was computed from, so acceptance/rejection is traceable from
         # the table itself, not just the boolean flag.
         lines.append(
             f"| {row['program_id']} | {row['college_id']} | {row['metric']} | {row['prophet_mae']:.2f} | "
             f"{row['prophet_rmse']:.2f} | {coverage_display} | {width_display} | {norm_width_display} | "
+            f"{calibration_display} | "
             f"{row['naive_mae']:.2f} | {row['historical_avg_mae']:.2f} | {seasonal_display} | "
             f"{count_model_display} | "
             f"{row['best_baseline_mae']:.2f} | {row['mae_diff']:+.2f} | "

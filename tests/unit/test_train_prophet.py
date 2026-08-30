@@ -23,8 +23,12 @@ import pandas as pd
 import pytest
 
 from pipelines.common.errors import ModelEvaluationError, ModelTrainingError
+from models.forecasting import train_prophet as train_prophet_module
 from models.forecasting.train_prophet import (
+    MCMC_MIN_TRAIN_POINTS,
+    MCMC_SAMPLES,
     MIN_HISTORY_PERIODS,
+    IntervalCalibration,
     compute_metrics_for_model,
     evaluate_all_series,
     fit_prophet,
@@ -194,6 +198,143 @@ def test_fit_prophet_passes_explicit_seasonality_config_to_prophet(monkeypatch):
         "weekly_seasonality": False,
         "daily_seasonality": False,
     }
+
+
+# --- P0 Gate Follow-Up 22.1: interval calibration --------------------------
+# See MCMC_SAMPLES/MCMC_MIN_TRAIN_POINTS/IntervalCalibration in
+# train_prophet.py and docs/22_Interval_Calibration_Resolution.md for the
+# full rationale (a real benchmark, not a guess, drove these thresholds).
+
+def _small_train_df(n_rows: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ds": [f"2021-0{1 if i % 2 == 0 else 7}-01" for i in range(n_rows)],
+            "y": [float(10 + i) for i in range(n_rows)],
+        }
+    )
+
+
+def test_fit_prophet_stays_map_only_below_mcmc_threshold(monkeypatch):
+    """Below MCMC_MIN_TRAIN_POINTS, fit_prophet must never even attempt
+    MCMC sampling -- no mcmc_samples kwarg reaches Prophet() -- and must
+    mark the result as disclosed, not calibrated."""
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS - 1)
+
+    model = fit_prophet(train_df)
+
+    assert "mcmc_samples" not in model.init_kwargs
+    calibration = model._interval_calibration
+    assert isinstance(calibration, IntervalCalibration)
+    assert calibration.calibrated is False
+    assert calibration.method == "map_disclosed"
+    assert "too short" in calibration.reason
+
+
+def test_fit_prophet_attempts_mcmc_at_threshold_and_marks_calibrated_when_clean(monkeypatch):
+    """At/above MCMC_MIN_TRAIN_POINTS, fit_prophet must pass
+    mcmc_samples=MCMC_SAMPLES to Prophet(), and -- when the (stubbed)
+    convergence check reports zero divergent transitions -- mark the
+    result as genuinely calibrated."""
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "_mcmc_divergent_transitions", lambda model: 0)
+    train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
+
+    model = fit_prophet(train_df)
+
+    assert model.init_kwargs["mcmc_samples"] == MCMC_SAMPLES
+    calibration = model._interval_calibration
+    assert calibration.calibrated is True
+    assert calibration.method == "bayesian_mcmc"
+
+
+def test_fit_prophet_falls_back_to_map_when_mcmc_diverges(monkeypatch):
+    """Divergent transitions must override the size threshold: even a
+    fold long enough to attempt MCMC gets its interval disclosed, not
+    trusted, if the sampler didn't actually converge."""
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "_mcmc_divergent_transitions", lambda model: 7)
+    train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
+
+    model = fit_prophet(train_df)
+
+    # The fallback fit is a fresh MAP-only Prophet() call -- no
+    # mcmc_samples kwarg -- not the diverged MCMC model.
+    assert "mcmc_samples" not in model.init_kwargs
+    calibration = model._interval_calibration
+    assert calibration.calibrated is False
+    assert calibration.method == "map_disclosed"
+    assert "diverged" in calibration.reason
+
+
+def test_fit_prophet_treats_undeterminable_diagnostics_as_disclosed(monkeypatch):
+    """If the convergence diagnostic can't be read at all (version
+    drift in Prophet/CmdStanPy), fit_prophet must not silently assume
+    the interval is fine -- it should disclose, not guess."""
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "_mcmc_divergent_transitions", lambda model: None)
+    train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
+
+    model = fit_prophet(train_df)
+
+    calibration = model._interval_calibration
+    assert calibration.calibrated is False
+    assert "could not read" in calibration.reason
+
+
+def test_mcmc_divergent_transitions_sums_across_chains():
+    class _FakeStanFit:
+        divergences = [3, 0, 12, 1]
+
+    class _FakeBackend:
+        stan_fit = _FakeStanFit()
+
+    class _FakeModel:
+        stan_backend = _FakeBackend()
+
+    assert train_prophet_module._mcmc_divergent_transitions(_FakeModel()) == 16
+
+
+def test_mcmc_divergent_transitions_returns_none_when_unavailable():
+    class _FakeModelNoBackend:
+        pass
+
+    assert train_prophet_module._mcmc_divergent_transitions(_FakeModelNoBackend()) is None
+
+
+def test_walk_forward_evaluate_records_interval_calibration_per_fold(monkeypatch):
+    """walk_forward_evaluate must read model._interval_calibration off
+    whatever fit_prophet returns for each fold and record it -- this is
+    the wiring the evaluation report's calibration column depends on."""
+    calibrations = iter([
+        IntervalCalibration(calibrated=True, method="bayesian_mcmc"),
+        IntervalCalibration(calibrated=False, method="map_disclosed", reason="too short"),
+        IntervalCalibration(calibrated=True, method="bayesian_mcmc"),
+    ])
+
+    class _StubModel:
+        def predict(self, future_df):
+            return pd.DataFrame({
+                "ds": future_df["ds"], "yhat": [5.0], "yhat_lower": [4.0], "yhat_upper": [6.0],
+            })
+
+    def _fake_fit_prophet(train_df):
+        m = _StubModel()
+        m._interval_calibration = next(calibrations)
+        return m
+
+    monkeypatch.setattr(train_prophet_module, "fit_prophet", _fake_fit_prophet)
+
+    n = 6
+    series = pd.DataFrame({
+        "period_ordinal": list(range(n)),
+        "ds": pd.date_range("2021-01-01", periods=n, freq="6MS").strftime("%Y-%m-%d").tolist(),
+        "enrollment_count": [float(10 + i) for i in range(n)],
+    })
+
+    result = walk_forward_evaluate(series, "enrollment_count")
+
+    assert result["prophet"]["interval_calibrated"] == [True, False, True]
 
 
 def test_evaluate_all_series_wraps_evaluation_failures_in_model_evaluation_error(monkeypatch):
