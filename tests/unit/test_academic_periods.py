@@ -17,6 +17,7 @@ import pytest
 
 from pipelines.common.academic_periods import (
     OBSERVED_START_YEAR,
+    OBSERVED_YEAR_COUNT,
     SEMESTER_LABELS,
     YEAR_LEVEL_LABELS,
     SUPER_SENIOR_LABEL,
@@ -221,14 +222,17 @@ def test_academic_year_categorical_dtype_orders_years_chronologically():
     assert dtype.ordered is True
 
 
-def test_academic_year_categorical_dtype_defaults_to_three_year_observed_window():
-    """P0.4: the canonical dataset horizon is 3 academic years (2021-2022
-    through 2023-2024), not the pre-migration 4-year window -- see
-    OBSERVED_START_YEAR's docstring and academic_year_categorical_dtype's
-    `years or range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)` default."""
+def test_academic_year_categorical_dtype_defaults_to_five_year_observed_window():
+    """P0 Dataset Extension: the canonical dataset horizon is 5 academic
+    years (2021-2022 through 2025-2026) -- extended from P0.4's 3-year
+    window, which was itself a correction of the pre-migration 4-year
+    window. Uses OBSERVED_YEAR_COUNT (the canonical source
+    academic_year_categorical_dtype's default now reads from) rather than
+    a hardcoded +5, so this test stays correct if the window changes
+    again without anyone remembering to update this literal."""
     dtype = academic_year_categorical_dtype()
     assert list(dtype.categories) == [
-        academic_year_label(y) for y in range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + 3)
+        academic_year_label(y) for y in range(OBSERVED_START_YEAR, OBSERVED_START_YEAR + OBSERVED_YEAR_COUNT)
     ]
 
 

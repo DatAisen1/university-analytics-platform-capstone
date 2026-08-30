@@ -75,7 +75,9 @@ from models.forecasting.baselines import (
     seasonal_naive_baseline,
 )
 from models.forecasting.count_model import fit_and_predict_count_model
-from models.forecasting.metrics import mae, mape, r_squared, rmse
+from models.forecasting.metrics import (
+    interval_coverage, mae, mape, mean_interval_width, normalized_interval_width, r_squared, rmse,
+)
 
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
 logging.getLogger("prophet").setLevel(logging.WARNING)
@@ -335,6 +337,20 @@ def predict_point(model, ds: str) -> float:
     return float(forecast["yhat"].iloc[0])
 
 
+def predict_interval(model, ds: str) -> Tuple[float, float, float]:
+    """(yhat, yhat_lower, yhat_upper) -- Prophet's own fitted 80%
+    interval (its default interval_width, unchanged by the P0-A.1
+    seasonality fix, which only touched yearly/weekly/daily_seasonality).
+    Used by walk_forward_evaluate to compute interval coverage/width
+    (P0 Full Re-run gate), not just point MAE/RMSE -- a model can have a
+    good point MAE while its stated uncertainty is badly miscalibrated,
+    and the old report had no way to show that."""
+    future = pd.DataFrame({"ds": [ds]})
+    forecast = model.predict(future)
+    row = forecast.iloc[0]
+    return float(row["yhat"]), float(row["yhat_lower"]), float(row["yhat_upper"])
+
+
 def load_model(artifact_path: Path):
     """Load a pickled model previously written by one of this package's
     save sites (train_final_models below, models.forecasting.deploy_forecast
@@ -377,10 +393,10 @@ def walk_forward_evaluate(
         test_ordinals = derive_test_period_ordinals(int(series["period_ordinal"].max()))
 
     results: Dict[str, Dict[str, List[float]]] = {
-        "prophet": {"actual": [], "predicted": []},
-        "naive": {"actual": [], "predicted": []},
-        "historical_avg": {"actual": [], "predicted": []},
-        "seasonal_naive": {"actual": [], "predicted": []},
+        "prophet": {"actual": [], "predicted": [], "lower": [], "upper": []},
+        "naive": {"actual": [], "predicted": [], "lower": [], "upper": []},
+        "historical_avg": {"actual": [], "predicted": [], "lower": [], "upper": []},
+        "seasonal_naive": {"actual": [], "predicted": [], "lower": [], "upper": []},
         # P2.1: count_model (Poisson/Negative-Binomial GLM, see
         # models/forecasting/count_model.py) is only ever fit for
         # graduation_count -- the ONE metric P1.6's measurement showed a
@@ -393,7 +409,7 @@ def walk_forward_evaluate(
         # algorithm_candidates loop, both of which already skip any
         # algorithm with a NaN MAE), so no additional plumbing was
         # needed to keep it out of enrollment_count's comparison.
-        "count_model": {"actual": [], "predicted": []},
+        "count_model": {"actual": [], "predicted": [], "lower": [], "upper": []},
     }
 
     for test_key in test_ordinals:
@@ -407,7 +423,7 @@ def walk_forward_evaluate(
 
         train_prophet_df = to_prophet_frame(train, metric)
         model = fit_prophet(train_prophet_df)
-        prophet_pred = predict_point(model, test_ds)
+        prophet_pred, prophet_lower, prophet_upper = predict_interval(model, test_ds)
 
         train_values = train[metric].tolist()
         naive_pred = naive_baseline(train_values)
@@ -415,10 +431,22 @@ def walk_forward_evaluate(
 
         results["prophet"]["actual"].append(actual)
         results["prophet"]["predicted"].append(prophet_pred)
+        results["prophet"]["lower"].append(prophet_lower)
+        results["prophet"]["upper"].append(prophet_upper)
         results["naive"]["actual"].append(actual)
         results["naive"]["predicted"].append(naive_pred)
+        # Degenerate interval by policy, not oversight -- see
+        # baselines.py's module docstring ("Prediction-interval policy
+        # for a deployed baseline"): a persistence/average forecast has
+        # no principled distribution to derive a CI from, so
+        # yhat_lower == yhat_upper == yhat here, matching exactly what
+        # BaselineModel already does for deployed baseline champions.
+        results["naive"]["lower"].append(naive_pred)
+        results["naive"]["upper"].append(naive_pred)
         results["historical_avg"]["actual"].append(actual)
         results["historical_avg"]["predicted"].append(hist_avg_pred)
+        results["historical_avg"]["lower"].append(hist_avg_pred)
+        results["historical_avg"]["upper"].append(hist_avg_pred)
 
         # P1.16: only contribute a seasonal_naive point for folds where
         # the equivalent prior-season period actually exists in this
@@ -440,6 +468,8 @@ def walk_forward_evaluate(
         else:
             results["seasonal_naive"]["actual"].append(actual)
             results["seasonal_naive"]["predicted"].append(seasonal_pred)
+            results["seasonal_naive"]["lower"].append(seasonal_pred)  # degenerate, same policy as naive/hist_avg
+            results["seasonal_naive"]["upper"].append(seasonal_pred)
 
         # P2.1: count_model, gated to graduation_count only -- see the
         # results dict comment above for why. Wrapped broadly (not just
@@ -461,11 +491,16 @@ def walk_forward_evaluate(
             else:
                 results["count_model"]["actual"].append(actual)
                 results["count_model"]["predicted"].append(count_fit.yhat)
+                results["count_model"]["lower"].append(count_fit.yhat_lower)
+                results["count_model"]["upper"].append(count_fit.yhat_upper)
 
     return results
 
 
-def compute_metrics_for_model(actual: List[float], predicted: List[float]) -> Dict[str, float]:
+def compute_metrics_for_model(
+    actual: List[float], predicted: List[float],
+    lower: Optional[List[float]] = None, upper: Optional[List[float]] = None,
+) -> Dict[str, float]:
     # P2.1 fix: zero eligible folds (already possible for seasonal_naive
     # -- a series with no prior-season lookback value -- and now also for
     # count_model on every enrollment_count row, since it's only ever fit
@@ -480,13 +515,35 @@ def compute_metrics_for_model(actual: List[float], predicted: List[float]) -> Di
     # newly exposes count_model_r2 in evaluate_all_series' output, so
     # the quirk is now visible and worth fixing here rather than
     # inheriting it for a second algorithm.
+    #
+    # P0 (Full Re-run gate): lower/upper are optional so existing callers
+    # (and every test written before this fix) that only pass
+    # actual/predicted keep working -- coverage/width fields are simply
+    # NaN/"0/0" when bounds aren't supplied, the same "not evaluated"
+    # convention the rest of this function already uses.
     if len(actual) == 0:
-        return {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan"), "mape": float("nan")}
+        return {
+            "mae": float("nan"), "rmse": float("nan"), "r2": float("nan"), "mape": float("nan"),
+            "coverage_hits": 0, "coverage_n": 0,
+            "mean_interval_width": float("nan"), "normalized_interval_width": float("nan"),
+        }
     result = {"mae": mae(actual, predicted), "rmse": rmse(actual, predicted), "r2": r_squared(actual, predicted)}
     try:
         result["mape"] = mape(actual, predicted)
     except ValueError:
         result["mape"] = float("nan")  # every actual value was 0 across all folds -- disclosed, not hidden
+
+    if lower is not None and upper is not None:
+        hits, n = interval_coverage(actual, lower, upper)
+        result["coverage_hits"] = hits
+        result["coverage_n"] = n
+        result["mean_interval_width"] = mean_interval_width(lower, upper)
+        result["normalized_interval_width"] = normalized_interval_width(lower, upper, actual)
+    else:
+        result["coverage_hits"] = 0
+        result["coverage_n"] = 0
+        result["mean_interval_width"] = float("nan")
+        result["normalized_interval_width"] = float("nan")
     return result
 
 
@@ -521,6 +578,10 @@ def evaluate_all_series(engine) -> pd.DataFrame:
             # See write_evaluation_report and select_champion_algorithm
             # (model_registry.py) for where it's actually compared.
             "count_model_mae", "count_model_rmse", "count_model_mape", "count_model_r2",
+            "prophet_coverage_hits", "prophet_coverage_n",
+            "prophet_mean_interval_width", "prophet_normalized_interval_width",
+            "count_model_coverage_hits", "count_model_coverage_n",
+            "count_model_mean_interval_width", "count_model_normalized_interval_width",
         ])
 
     rows = []
@@ -546,7 +607,7 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                 fold_results = walk_forward_evaluate(program_series, metric, test_ordinals)
 
                 model_metrics = {
-                    name: compute_metrics_for_model(r["actual"], r["predicted"])
+                    name: compute_metrics_for_model(r["actual"], r["predicted"], r["lower"], r["upper"])
                     for name, r in fold_results.items()
                 }
 
@@ -599,6 +660,27 @@ def evaluate_all_series(engine) -> pd.DataFrame:
                     "count_model_rmse": model_metrics["count_model"]["rmse"],
                     "count_model_mape": model_metrics["count_model"]["mape"],
                     "count_model_r2": model_metrics["count_model"]["r2"],
+                    # P0 (Full Re-run gate): interval coverage/width, not
+                    # just point-error metrics. Reported for Prophet --
+                    # the row's primary subject, matching every existing
+                    # prophet_* column above -- and for count_model on
+                    # graduation_count rows, since that's the other
+                    # algorithm in this pipeline with a real (non-
+                    # degenerate) fitted interval; naive/historical_avg/
+                    # seasonal_naive's intervals are degenerate by policy
+                    # (see baselines.py's module docstring) and would
+                    # only ever show 0/N coverage, adding columns without
+                    # adding information, so they're computed (available
+                    # in the CSV via model_metrics if ever needed) but
+                    # not surfaced as dedicated report columns here.
+                    "prophet_coverage_hits": model_metrics["prophet"]["coverage_hits"],
+                    "prophet_coverage_n": model_metrics["prophet"]["coverage_n"],
+                    "prophet_mean_interval_width": model_metrics["prophet"]["mean_interval_width"],
+                    "prophet_normalized_interval_width": model_metrics["prophet"]["normalized_interval_width"],
+                    "count_model_coverage_hits": model_metrics["count_model"]["coverage_hits"],
+                    "count_model_coverage_n": model_metrics["count_model"]["coverage_n"],
+                    "count_model_mean_interval_width": model_metrics["count_model"]["mean_interval_width"],
+                    "count_model_normalized_interval_width": model_metrics["count_model"]["normalized_interval_width"],
                 })
 
         return pd.DataFrame(rows)
@@ -681,9 +763,10 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         lines.append("")
 
     lines += [
-        "| Program | College | Metric | Prophet MAE | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | "
+        "| Program | College | Metric | Prophet MAE | Prophet RMSE | 80% Interval Coverage | "
+        "Mean Interval Width | Normalized Width | Naive MAE | Hist. Avg MAE | Seasonal Naive MAE | "
         "Count Model MAE | Best Baseline MAE | Diff (Prophet - Baseline) | Prophet R\u00b2 | Beats Baseline? |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     # P2.1: count_model_mae is an ADDITIVE column -- present in every
     # evaluate_all_series() output, but older/synthetic report_df
@@ -708,11 +791,26 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
             count_model_display = f"{row['count_model_mae']:.2f}"
         else:
             count_model_display = "n/a"
+        # P0 (Full Re-run gate): coverage is reported as "hits/n" (a
+        # fraction, not a smoothed percentage) -- with as few as 3 held-
+        # out points per series, "67%" implies more precision than 2/3
+        # actually carries. normalized_width is NaN (rendered "n/a") for
+        # the same reason mape can be: a series whose every held-out
+        # actual is 0 has no defined "relative to the actual" scale.
+        coverage_display = f"{int(row['prophet_coverage_hits'])}/{int(row['prophet_coverage_n'])}"
+        width_display = (
+            "n/a" if pd.isna(row["prophet_mean_interval_width"]) else f"{row['prophet_mean_interval_width']:.2f}"
+        )
+        norm_width_display = (
+            "n/a" if pd.isna(row["prophet_normalized_interval_width"])
+            else f"{row['prophet_normalized_interval_width']:.2f}"
+        )
         # P1.24: explicit signed difference alongside the two metrics it
         # was computed from, so acceptance/rejection is traceable from
         # the table itself, not just the boolean flag.
         lines.append(
             f"| {row['program_id']} | {row['college_id']} | {row['metric']} | {row['prophet_mae']:.2f} | "
+            f"{row['prophet_rmse']:.2f} | {coverage_display} | {width_display} | {norm_width_display} | "
             f"{row['naive_mae']:.2f} | {row['historical_avg_mae']:.2f} | {seasonal_display} | "
             f"{count_model_display} | "
             f"{row['best_baseline_mae']:.2f} | {row['mae_diff']:+.2f} | "

@@ -144,14 +144,28 @@ def test_low_risk_short_program_student_usually_graduates():
     assert graduated_share > 0.7
 
 
-def test_five_year_program_cannot_graduate_within_observed_window():
-    """Known, documented limitation: a 5-year program (10 nominal semesters)
-    entered in the 2021 cohort can accumulate at most 8 semesters of tenure
-    by 2024-2 -- never reaching eligibility, so zero graduations should be
-    possible regardless of risk_score. This test exists specifically to
-    keep that documented limitation honest: if generate_progression.py
-    ever changes in a way that lets this happen, this test should fail and
-    force the docs to be revisited."""
+def test_five_year_program_can_graduate_within_extended_observed_window():
+    """P0 Dataset Extension flips this test's old premise on purpose.
+
+    Previously (max_semester_index=5, i.e. the 2021-2023/6-period window):
+    a 5-year program (10 nominal semesters) entered in the 2021 cohort
+    could accumulate at most 6 semesters of tenure by 2023-2 -- never
+    reaching eligibility, so this test asserted `graduations == 0` and
+    existed specifically to keep that limitation honest.
+
+    Now (max_semester_index=9, i.e. the 2021-2025/10-period window): the
+    2021 cohort reaches exactly 10 semesters of tenure by 2025-2 -- the
+    minimum a 5-year program needs -- so on-time entrants CAN graduate for
+    the first time. This is not incidental to the extension; it's one of
+    the modeling gaps the extension was explicitly meant to close (see
+    generate_progression.py's module docstring and docs/10_Forecasting.md
+    §1's dataset-horizon note).
+
+    This test now asserts the opposite of what it used to: if
+    generate_progression.py ever regresses back to making this
+    structurally impossible, this test should fail and force that
+    regression to be noticed, the same protective role it played before
+    just pointed the other direction."""
     program = REFERENCE.as_program_lookup()["COE-BSCE"]  # nominal_duration_years = 5
     rng = np.random.default_rng(33)
     graduations = 0
@@ -162,7 +176,14 @@ def test_five_year_program_cannot_graduate_within_observed_window():
         )
         if result["final_status"] == "GRADUATED":
             graduations += 1
-    assert graduations == 0
+    # Not a tight bound on the exact rate (that's a property of the
+    # progression-probability config, not this test's concern) -- just
+    # confirming graduation is structurally reachable at all now, which
+    # is the thing the extension changed. Empirically ~46/200 at risk=0
+    # with this seed; a low, non-zero floor guards against a future
+    # regression re-introducing the impossibility without pinning an
+    # exact rate that has no principled "correct" value.
+    assert graduations > 0
 
 
 # ---------------------------------------------------------------------------

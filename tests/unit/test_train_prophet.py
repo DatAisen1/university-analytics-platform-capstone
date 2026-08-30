@@ -390,12 +390,19 @@ def _report_row(
     """Builds one row shaped like evaluate_all_series' output -- just the
     columns write_evaluation_report / summarize_graduation_count_reconciliation
     actually read, so these tests stay decoupled from the full evaluation
-    pipeline (and therefore don't need Postgres)."""
+    pipeline (and therefore don't need Postgres).
+
+    P0 (Full Re-run gate): prophet_rmse/coverage/width fields added,
+    matching evaluate_all_series' real output shape -- write_evaluation_report
+    now reads these unconditionally (unlike count_model_mae, which is
+    checked for presence before use), so a fixture missing them would
+    raise KeyError, not silently render 'n/a'."""
     return {
         "program_id": program_id,
         "college_id": college_id,
         "metric": metric,
         "prophet_mae": prophet_mae,
+        "prophet_rmse": prophet_mae * 1.2,  # plausible RMSE >= MAE, not a real computation
         "prophet_mape": prophet_mape,
         "naive_mae": best_baseline_mae + 5,
         "historical_avg_mae": best_baseline_mae + 3,
@@ -404,6 +411,10 @@ def _report_row(
         "mae_diff": prophet_mae - best_baseline_mae,
         "prophet_r2": 0.85,
         "prophet_beats_best_baseline": beats,
+        "prophet_coverage_hits": 3,
+        "prophet_coverage_n": 3,
+        "prophet_mean_interval_width": prophet_mae * 2,
+        "prophet_normalized_interval_width": 0.5,
     }
 
 

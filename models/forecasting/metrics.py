@@ -60,3 +60,57 @@ def r_squared(y_true: Sequence[float], y_pred: Sequence[float]) -> float:
         # otherwise 0.0 (no better than predicting the constant itself).
         return 1.0 if ss_res == 0 else 0.0
     return float(1 - (ss_res / ss_tot))
+
+
+def interval_coverage(
+    y_true: Sequence[float], y_lower: Sequence[float], y_upper: Sequence[float]
+) -> tuple[int, int]:
+    """(hits, n): how many of n held-out actuals fell within [y_lower,
+    y_upper] -- the empirical check on whether a model's stated 80%
+    interval actually behaves like an 80% interval on THIS project's real
+    fold sizes (as few as 3 held-out points per series; empirical
+    coverage at that n is a noisy estimate of the true rate, reported as
+    a fraction (x/N), not smoothed into a misleadingly precise
+    percentage). A baseline's degenerate y_lower == y_upper == yhat
+    interval (see baselines.py's BaselineModel docstring) will show 0/N
+    coverage unless a prediction happens to exactly equal the actual --
+    that's the honest consequence of reporting no uncertainty, not a
+    bug in this function.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_lower = np.asarray(y_lower, dtype=float)
+    y_upper = np.asarray(y_upper, dtype=float)
+    hits = int(np.sum((y_true >= y_lower) & (y_true <= y_upper)))
+    return hits, len(y_true)
+
+
+def mean_interval_width(y_lower: Sequence[float], y_upper: Sequence[float]) -> float:
+    """Average (y_upper - y_lower) across held-out folds, in the metric's
+    original units. A model can win on coverage by producing a wide
+    enough interval to swallow anything -- this is the companion metric
+    that keeps a wide-but-useless interval from looking as good as a
+    tight, well-calibrated one; read coverage and width together, never
+    coverage alone."""
+    y_lower = np.asarray(y_lower, dtype=float)
+    y_upper = np.asarray(y_upper, dtype=float)
+    return float(np.mean(y_upper - y_lower))
+
+
+def normalized_interval_width(
+    y_lower: Sequence[float], y_upper: Sequence[float], y_true: Sequence[float]
+) -> float:
+    """mean_interval_width, divided by the mean of the actual values --
+    the same small-vs-large-program scale problem MAPE exists to fix for
+    point error (§8 of docs/10_Forecasting.md) applies just as much to
+    interval width: a graduation_count interval of +/-3 students is huge
+    for a program that graduates 2 people a semester and tiny for one
+    that graduates 40. Undefined (NaN, not raised) where every y_true
+    value is 0 -- the same "disclosed, not hidden" convention
+    compute_metrics_for_model already applies to MAPE in that case,
+    rather than raising and aborting the whole series' evaluation.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    mean_actual = float(np.mean(y_true))
+    if mean_actual == 0:
+        return float("nan")
+    return mean_interval_width(y_lower, y_upper) / mean_actual
