@@ -128,7 +128,7 @@ with tab_kpi:
         """
         select academic_year, semester_number, period_label,
                total_enrollment, total_graduates, total_dropouts,
-               overall_dropout_rate, overall_retention_rate, overall_success_rate
+               overall_dropout_rate, overall_retention_rate, overall_institutional_success_index
         from marts.mart_executive_summary
         order by academic_year, semester_number
         """
@@ -147,29 +147,31 @@ with tab_kpi:
         c1.metric("Total Enrollment", f"{int(latest['total_enrollment']):,}")
         c2.metric("Total Graduates", f"{int(latest['total_graduates']):,}")
         c3.metric("Dropout Rate", f"{latest['overall_dropout_rate']:.1%}")
-        c4.metric("Success Rate", f"{latest['overall_success_rate']:.1f}")
+        c4.metric("Institutional Success Index", f"{latest['overall_institutional_success_index']:.1f}")
 
         st.divider()
-        st.markdown("**Per college -- same semester, all Success Rate sub-components**")
+        st.markdown("**Per college -- same semester, all Institutional Success Index sub-components**")
 
         kpi_df = run_query(
             """
             select college_id, college_name, retention_rate, graduation_rate,
-                   dropout_rate, shifter_stability, enrollment_stability,
-                   program_completion_momentum, success_rate, enrollment_count,
+                   dropout_rate, shifter_stability, enrollment_growth, enrollment_volatility,
+                   outgoing_shift_count, incoming_shift_count, net_shift_flow,
+                   program_completion_momentum, institutional_success_index, enrollment_count,
                    graduation_count
             from marts.mart_institution_kpi
             where academic_year = %(y)s and semester_number = %(s)s
-            order by success_rate desc
+            order by institutional_success_index desc
             """,
             params={"y": int(latest["academic_year"]), "s": int(latest["semester_number"])},
         )
-        st.bar_chart(kpi_df.set_index("college_id")["success_rate"])
+        st.bar_chart(kpi_df.set_index("college_id")["institutional_success_index"])
         st.dataframe(kpi_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
-# Tab 2 -- Trend: Success Rate and enrollment over all in-scope semesters,
-# campus-wide vs. a selected college. Source: marts.mart_college_performance.
+# Tab 2 -- Trend: Institutional Success Index and enrollment over all
+# in-scope semesters, campus-wide vs. a selected college.
+# Source: marts.mart_college_performance.
 # ---------------------------------------------------------------------------
 with tab_trend:
     st.subheader("Trend across all 6 semesters")
@@ -186,8 +188,8 @@ with tab_trend:
         )
         trend_df = run_query(
             """
-            select period_label, academic_year, semester_number, success_rate,
-                   campus_avg_success_rate, enrollment_count, retention_rate,
+            select period_label, academic_year, semester_number, institutional_success_index,
+                   campus_avg_institutional_success_index, enrollment_count, retention_rate,
                    dropout_rate
             from marts.mart_college_performance
             where college_id = %(cid)s
@@ -196,10 +198,10 @@ with tab_trend:
             params={"cid": selected},
         )
         chart_df = trend_df.set_index("period_label")[
-            ["success_rate", "campus_avg_success_rate"]
+            ["institutional_success_index", "campus_avg_institutional_success_index"]
         ]
         st.line_chart(chart_df)
-        st.caption(f"{selected} success rate vs. campus-wide average, per semester.")
+        st.caption(f"{selected} Institutional Success Index vs. campus-wide average, per semester.")
         st.line_chart(trend_df.set_index("period_label")[["enrollment_count"]])
         st.caption(f"{selected} enrollment, per semester.")
         st.dataframe(trend_df, use_container_width=True, hide_index=True)
