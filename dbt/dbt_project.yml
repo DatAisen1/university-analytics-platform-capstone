@@ -39,3 +39,18 @@ models:
       +materialized: view
     marts:
       +materialized: table
+
+# P2 -- Trend Analysis thresholds (dbt/macros/trend_metrics.sql). Vars,
+# not literals inlined in the SQL, the same way build_kpi.py's WEIGHTS
+# is a module-level dict rather than inlined numbers -- lets these be
+# tuned or sensitivity-tested without touching the macro.
+vars:
+  # Minimum periods observed for a series before trend_classification()
+  # will emit a directional label at all; below this, every row gets
+  # 'insufficient_history' regardless of slope.
+  trend_min_periods: 3
+  # Deadband around zero slope (as a fraction of the series' trailing
+  # average) inside which a series is classified 'stable' rather than
+  # 'increasing'/'decreasing'. 0.02 = slope must exceed 2% of the
+  # trailing average, per period, to count as directional movement.
+  trend_deadband_pct: 0.02

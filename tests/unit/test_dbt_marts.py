@@ -79,11 +79,13 @@ def _run_dbt(*args) -> subprocess.CompletedProcess:
     )
 
 
-def test_dbt_run_builds_all_five_marts_with_zero_errors():
+def test_dbt_run_builds_all_seven_marts_with_zero_errors():
+    # 5 original marts + mart_college_trend + mart_program_trend (P2 --
+    # Trend Analysis). Bumped from ">= 5" alongside those two additions.
     result = _run_dbt("run", "--select", "path:models/marts")
     assert result.returncode == 0, result.stdout + result.stderr
     match = re.search(r"Done\. PASS=(\d+)", result.stdout)
-    assert match and int(match.group(1)) >= 5
+    assert match and int(match.group(1)) >= 7
 
 
 def test_dbt_test_passes_for_marts():
@@ -160,6 +162,53 @@ def test_mart_retention_risk_flag_matches_its_own_stated_definition():
         mismatch_count = cur.fetchone()[0]
     conn.close()
     assert mismatch_count == 0
+
+
+@pytest.mark.skipif(not _marts_exist(), reason="Marts must be built first -- run `dbt run` before this test")
+def test_mart_trend_marts_delta_arithmetic_is_internally_consistent():
+    # semester_over_semester_abs_delta is DEFINED as metric_value -
+    # prior_period_value -- this catches a regression where the two
+    # drift apart (e.g. someone edits one but not the other).
+    conn = get_role_connection("dbt_role", DBT_ROLE_PASSWORD, env=TEST_ENV)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) FROM marts.mart_college_trend
+            WHERE prior_period_value IS NOT NULL
+              AND ABS(semester_over_semester_abs_delta - (metric_value - prior_period_value)) > 0.0001
+        """)
+        college_mismatch = cur.fetchone()[0]
+        cur.execute("""
+            SELECT COUNT(*) FROM marts.mart_program_trend
+            WHERE prior_period_value IS NOT NULL
+              AND ABS(semester_over_semester_abs_delta - (metric_value - prior_period_value)) > 0.0001
+        """)
+        program_mismatch = cur.fetchone()[0]
+    conn.close()
+    assert college_mismatch == 0
+    assert program_mismatch == 0
+
+
+@pytest.mark.skipif(not _marts_exist(), reason="Marts must be built first -- run `dbt run` before this test")
+def test_mart_trend_classification_never_directional_below_min_periods():
+    # Mirrors dbt/tests/assert_trend_classification_respects_min_periods.sql
+    # as a pytest-level check too -- below trend_min_periods (dbt var,
+    # default 3), every row must be 'insufficient_history', never a
+    # directional label, regardless of what the raw slope says.
+    conn = get_role_connection("dbt_role", DBT_ROLE_PASSWORD, env=TEST_ENV)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) FROM marts.mart_college_trend
+            WHERE period_count < 3 AND trend_classification != 'insufficient_history'
+        """)
+        college_violations = cur.fetchone()[0]
+        cur.execute("""
+            SELECT COUNT(*) FROM marts.mart_program_trend
+            WHERE period_count < 3 AND trend_classification != 'insufficient_history'
+        """)
+        program_violations = cur.fetchone()[0]
+    conn.close()
+    assert college_violations == 0
+    assert program_violations == 0
 
 
 @pytest.mark.skipif(not _marts_exist(), reason="Marts must be built first -- run `dbt run` before this test")

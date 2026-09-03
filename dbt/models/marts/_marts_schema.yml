@@ -98,6 +98,82 @@ models:
           arguments:
             combination_of_columns: [program_key, academic_period_key]
 
+  - name: mart_college_trend
+    description: "P2 -- Trend Analysis, college grain. Long/tall: one row per (college, semester, metric) -- absolute/percent delta, semester-over-semester, YoY same-semester, slope, and a deadband-based trend_classification, always paired with period_count."
+    columns:
+      - name: college_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_college')
+                field: college_key
+      - name: academic_period_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
+      - name: metric_name
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['enrollment_count', 'retention_rate', 'graduation_rate', 'dropout_rate', 'institutional_success_index']
+      - name: metric_value
+        tests: [not_null]
+      - name: period_count
+        tests: [not_null]
+      - name: trend_classification
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['insufficient_history', 'increasing', 'decreasing', 'stable']
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [college_key, academic_period_key, metric_name]
+
+  - name: mart_program_trend
+    description: "P2 -- Trend Analysis, program grain. Long/tall: one row per (program, semester, metric), same shape and shared macro as mart_college_trend."
+    columns:
+      - name: program_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_program')
+                field: program_key
+      - name: academic_period_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_dim_academic_period')
+                field: academic_period_key
+      - name: metric_name
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['enrollment_count', 'graduation_count', 'dropout_rate']
+      - name: metric_value
+        tests: [not_null]
+      - name: period_count
+        tests: [not_null]
+      - name: trend_classification
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['insufficient_history', 'increasing', 'decreasing', 'stable']
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [program_key, academic_period_key, metric_name]
+
   - name: mart_retention_risk
     description: "Decision-support mart: flags programs whose retention rate has declined for 2 consecutive semesters."
     columns:
