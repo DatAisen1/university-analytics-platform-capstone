@@ -6,7 +6,7 @@
 with campus_avg as (
     select
         academic_period_key,
-        avg(success_rate) as campus_avg_success_rate
+        avg(institutional_success_index) as campus_avg_institutional_success_index
     from {{ ref('stg_fact_institution_kpi') }}
     group by academic_period_key
 )
@@ -23,9 +23,9 @@ select
     kpi.retention_rate,
     kpi.graduation_rate,
     kpi.dropout_rate,
-    kpi.success_rate,
-    campus_avg.campus_avg_success_rate,
-    kpi.success_rate - campus_avg.campus_avg_success_rate as success_rate_vs_campus_avg
+    kpi.institutional_success_index,
+    campus_avg.campus_avg_institutional_success_index,
+    kpi.institutional_success_index - campus_avg.campus_avg_institutional_success_index as institutional_success_index_vs_campus_avg
 from {{ ref('stg_fact_institution_kpi') }} kpi
 join {{ ref('stg_dim_college') }} col on kpi.college_key = col.college_key
 join {{ ref('stg_dim_academic_period') }} per on kpi.academic_period_key = per.academic_period_key

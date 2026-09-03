@@ -141,7 +141,7 @@ def test_mart_college_performance_benchmark_arithmetic_is_internally_consistent(
     with conn.cursor() as cur:
         cur.execute("""
             SELECT COUNT(*) FROM marts.mart_college_performance
-            WHERE ABS(success_rate_vs_campus_avg - (success_rate - campus_avg_success_rate)) > 0.001
+            WHERE ABS(institutional_success_index_vs_campus_avg - (institutional_success_index - campus_avg_institutional_success_index)) > 0.001
         """)
         inconsistent_count = cur.fetchone()[0]
     conn.close()

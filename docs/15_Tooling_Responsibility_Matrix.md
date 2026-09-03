@@ -37,8 +37,8 @@ is deliberate, not incidental duplication.
 ## Anti-pattern this matrix prevents
 
 Do **not** add a fourth place that recomputes something already computed
-upstream — e.g. a dbt mart that recalculates `success_rate` instead of
-selecting it from `gold.fact_institution_kpi`. If you're about to write
+upstream — e.g. a dbt mart that recalculates `institutional_success_index`
+instead of selecting it from `gold.fact_institution_kpi`. If you're about to write
 business logic in SQL that already exists in a `pipelines/gold/build_*.py`
 module, stop and either (a) select from the existing Gold table, or (b)
 move the logic upstream and delete the duplicate.

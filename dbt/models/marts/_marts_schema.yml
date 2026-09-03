@@ -11,7 +11,7 @@ version: 2
 
 models:
   - name: mart_institution_kpi
-    description: "One row per (college, semester): all six Success Rate components + composite, with human-readable labels."
+    description: "One row per (college, semester): all Institutional Success Index sub-components + composite, with human-readable labels."
     columns:
       - name: college_key
         tests:
@@ -27,7 +27,7 @@ models:
               arguments:
                 to: ref('stg_dim_academic_period')
                 field: academic_period_key
-      - name: success_rate
+      - name: institutional_success_index
         tests: [not_null]
     tests:
       - dbt_utils.unique_combination_of_columns:
@@ -51,7 +51,7 @@ models:
               arguments:
                 to: ref('stg_dim_academic_period')
                 field: academic_period_key
-      - name: success_rate_vs_campus_avg
+      - name: institutional_success_index_vs_campus_avg
         tests: [not_null]
     tests:
       - dbt_utils.unique_combination_of_columns:
@@ -71,7 +71,7 @@ models:
                 field: academic_period_key
       - name: total_enrollment
         tests: [not_null]
-      - name: overall_success_rate
+      - name: overall_institutional_success_index
         tests: [not_null]
 
   - name: mart_program_performance

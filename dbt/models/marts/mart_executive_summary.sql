@@ -13,7 +13,7 @@ select
     sum(kpi.dropout_count) as total_dropouts,
     sum(kpi.dropout_count)::float / nullif(sum(kpi.enrollment_count), 0) as overall_dropout_rate,
     sum(kpi.enrollment_count * kpi.retention_rate) / nullif(sum(kpi.enrollment_count), 0) as overall_retention_rate,
-    sum(kpi.enrollment_count * kpi.success_rate) / nullif(sum(kpi.enrollment_count), 0) as overall_success_rate
+    sum(kpi.enrollment_count * kpi.institutional_success_index) / nullif(sum(kpi.enrollment_count), 0) as overall_institutional_success_index
 from {{ ref('stg_fact_institution_kpi') }} kpi
 join {{ ref('stg_dim_academic_period') }} per on kpi.academic_period_key = per.academic_period_key
 group by per.academic_period_key, per.period_label, per.academic_year, per.semester_number
