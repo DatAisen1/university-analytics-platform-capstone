@@ -20,6 +20,19 @@ The current student/progression generator only simulates students **entering** d
 
 ## 2. MLOps Maturity
 
+- **Multi-period-ahead forecasting** (2+ semesters out, not just next
+  semester). **Deliberately out of scope, locked as of P1.4** — see
+  `20_ML_Assumptions.md` §2. Trigger condition: a real administrative
+  use case that specifically needs a 2+ semester runway (e.g. multi-year
+  capacity planning) rather than the next-semester staffing/resourcing
+  question this project was actually asked to answer, combined with
+  enough walk-forward history to evaluate multi-step error honestly
+  (a 1-step model's demonstrated accuracy says nothing about 2-step
+  accuracy without separately validating it). What it would replace:
+  `deploy_forecast.py`'s single-row `future` frame with Prophet's own
+  `make_future_dataframe(periods=N)`, plus a walk-forward evaluation
+  redesign to score multi-step error specifically, not just repurpose
+  the existing 1-step folds.
 - **Model registry** (e.g., MLflow) to version and compare forecasting models over time, rather than a single `model_version` tag in `fact_forecast`.
 - **Automated retraining pipeline** triggered each semester as new actuals arrive, with drift detection comparing forecast error trends over time.
 - **A/B comparison harness** to formally compare Prophet against XGBoost/LSTM once enough historical semesters accumulate (5+ years) to make more data-hungry models viable, rather than disqualifying them permanently.
@@ -48,8 +61,10 @@ This is called out specifically to demonstrate that the star-schema and config-d
 ## 6. Honest Limitations of the Current Design (Stated Directly)
 
 - The Success Rate formula's weights are a documented judgment call, not an empirically validated model — a real deployment would ideally calibrate weights against actual downstream outcomes (e.g., alumni employment data) over multiple years, which doesn't exist yet.
+- **Forecast horizon is deliberately locked to next-semester-only** (P1.4) — see `20_ML_Assumptions.md` §2 and §2 above for what a longer horizon would need. This is stated as a design decision, not an accuracy claim about what Prophet *could* do if pointed at a longer horizon.
 - Forecasting confidence is inherently limited by only 8 semesters of history — this is disclosed on the Forecast Dashboard itself, not just in this document.
 - Synthetic data, however realistically modeled, cannot capture every real-world data pathology a live registrar integration would surface (e.g., true system-level data entry errors, legacy system quirks). The pipeline is built to be **robust to the kinds of messiness it was designed to simulate** — a real deployment would need a discovery phase against the actual source system before assuming the same validation rules suffice.
+- **Documentation lags the dataset extension (found during P1.4, not fixed here — logged, not silently patched).** This project's dataset was extended from 3 academic years / 6 semesters (`2021-2022` through `2023-2024`) to 5 academic years / 10 semesters (`2021-2022` through `2024-2025`) as part of a P0 gate, and the extension was verified end-to-end against a live pipeline run. Several docs in this set (`01_Project_Overview.md`, `04_Data_Modeling.md`, `09_Data_Science.md`, `10_Forecasting.md`, `13_Best_Practices.md`) still describe the old 6-semester/3-year model, including specific stale numbers (e.g. "48 rows" for `fact_institution_kpi`, which should now reflect 10 semesters). `20_ML_Assumptions.md` has a second, independent staleness bug beyond period count: it describes training as reading `gold.fact_institution_kpi` (college-grain), but `train_prophet.py::load_series()` actually reads `gold.ml_program_forecast_features` (program-grain) — a P1-era fix this doc never caught up to. Deliberately scoped out of P1.4 itself (which only needed to lock horizon language, not resync every historical claim) rather than silently expanded — a full doc-sync pass across all six files is real, tracked work for a future session, not something to assume is "basically fine" because most of the numbers are close.
 
 ## 7. Week 1 Retrospective (Days 1–7)
 

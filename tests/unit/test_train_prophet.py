@@ -215,10 +215,15 @@ def _small_train_df(n_rows: int) -> pd.DataFrame:
 
 
 def test_fit_prophet_stays_map_only_below_mcmc_threshold(monkeypatch):
-    """Below MCMC_MIN_TRAIN_POINTS, fit_prophet must never even attempt
-    MCMC sampling -- no mcmc_samples kwarg reaches Prophet() -- and must
-    mark the result as disclosed, not calibrated."""
+    """With MCMC_CALIBRATION_ENABLED on, below MCMC_MIN_TRAIN_POINTS,
+    fit_prophet must never even attempt MCMC sampling -- no mcmc_samples
+    kwarg reaches Prophet() -- and must mark the result as disclosed,
+    not calibrated. (The project-wide disabled-by-default case is
+    covered separately by
+    test_fit_prophet_never_attempts_mcmc_by_default_even_at_threshold,
+    which doesn't touch the flag at all.)"""
     monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "MCMC_CALIBRATION_ENABLED", True)
     train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS - 1)
 
     model = fit_prophet(train_df)
@@ -231,12 +236,36 @@ def test_fit_prophet_stays_map_only_below_mcmc_threshold(monkeypatch):
     assert "too short" in calibration.reason
 
 
-def test_fit_prophet_attempts_mcmc_at_threshold_and_marks_calibrated_when_clean(monkeypatch):
-    """At/above MCMC_MIN_TRAIN_POINTS, fit_prophet must pass
-    mcmc_samples=MCMC_SAMPLES to Prophet(), and -- when the (stubbed)
-    convergence check reports zero divergent transitions -- mark the
-    result as genuinely calibrated."""
+def test_fit_prophet_never_attempts_mcmc_by_default_even_at_threshold(monkeypatch):
+    """P0 Gate Follow-Up 22.1, 2nd pass: MCMC_CALIBRATION_ENABLED defaults
+    to False, because real measurement (scripts/diagnose_mcmc_divergence.py)
+    showed substantial divergence at every fold size this project can
+    produce (n=7, 8, 9) -- not just below the old threshold. So even at
+    n_train >= MCMC_MIN_TRAIN_POINTS, fit_prophet must NOT attempt MCMC
+    unless the flag is explicitly enabled -- this is the production
+    default, not a test-only setting."""
     monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
+
+    model = fit_prophet(train_df)
+
+    assert "mcmc_samples" not in model.init_kwargs
+    calibration = model._interval_calibration
+    assert calibration.calibrated is False
+    assert calibration.method == "map_disclosed"
+    assert "disabled" in calibration.reason
+
+
+def test_fit_prophet_attempts_mcmc_at_threshold_and_marks_calibrated_when_clean(monkeypatch):
+    """With MCMC_CALIBRATION_ENABLED explicitly turned back on (e.g. after
+    a future prior-tuning fix is re-benchmarked), at/above
+    MCMC_MIN_TRAIN_POINTS fit_prophet must pass mcmc_samples=MCMC_SAMPLES
+    to Prophet(), and -- when the (stubbed) convergence check reports
+    zero divergent transitions -- mark the result as genuinely
+    calibrated. This machinery is disabled by default (see the test
+    above) but must still work correctly if re-enabled."""
+    monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "MCMC_CALIBRATION_ENABLED", True)
     monkeypatch.setattr(train_prophet_module, "_mcmc_divergent_transitions", lambda model: 0)
     train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
 
@@ -249,10 +278,12 @@ def test_fit_prophet_attempts_mcmc_at_threshold_and_marks_calibrated_when_clean(
 
 
 def test_fit_prophet_falls_back_to_map_when_mcmc_diverges(monkeypatch):
-    """Divergent transitions must override the size threshold: even a
-    fold long enough to attempt MCMC gets its interval disclosed, not
-    trusted, if the sampler didn't actually converge."""
+    """With MCMC_CALIBRATION_ENABLED on, divergent transitions must
+    override the size threshold: even a fold long enough to attempt MCMC
+    gets its interval disclosed, not trusted, if the sampler didn't
+    actually converge."""
     monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "MCMC_CALIBRATION_ENABLED", True)
     monkeypatch.setattr(train_prophet_module, "_mcmc_divergent_transitions", lambda model: 7)
     train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
 
@@ -268,10 +299,12 @@ def test_fit_prophet_falls_back_to_map_when_mcmc_diverges(monkeypatch):
 
 
 def test_fit_prophet_treats_undeterminable_diagnostics_as_disclosed(monkeypatch):
-    """If the convergence diagnostic can't be read at all (version
-    drift in Prophet/CmdStanPy), fit_prophet must not silently assume
-    the interval is fine -- it should disclose, not guess."""
+    """With MCMC_CALIBRATION_ENABLED on, if the convergence diagnostic
+    can't be read at all (version drift in Prophet/CmdStanPy),
+    fit_prophet must not silently assume the interval is fine -- it
+    should disclose, not guess."""
     monkeypatch.setitem(sys.modules, "prophet", type("ProphetModule", (), {"Prophet": _FakeProphet}))
+    monkeypatch.setattr(train_prophet_module, "MCMC_CALIBRATION_ENABLED", True)
     monkeypatch.setattr(train_prophet_module, "_mcmc_divergent_transitions", lambda model: None)
     train_df = _small_train_df(MCMC_MIN_TRAIN_POINTS)
 

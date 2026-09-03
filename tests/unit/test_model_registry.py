@@ -15,10 +15,14 @@ from datetime import datetime, timezone
 import pytest
 
 from models.forecasting.model_registry import (
+    ALGORITHM_SIMPLICITY_RANK,
+    CHAMPION_TIE_TOLERANCE_PCT,
+    AlgorithmResult,
     CandidateMetrics,
     ChampionRecord,
     decide_promotion,
     make_model_version,
+    select_champion_algorithm,
     should_retrain,
 )
 
@@ -187,3 +191,104 @@ def test_does_not_retrain_when_data_appears_to_have_regressed():
     decision = should_retrain(current_max_period_ordinal=5, last_trained_period_ordinal=7)
     assert decision.should_retrain is False
     assert "regressed" in decision.reason
+
+
+# ---------------------------------------------------------------------
+# select_champion_algorithm (P1.1, Model Selection Robustness): no
+# direct unit coverage existed before this -- only an indirect
+# regression guard in tests/unit/test_count_model.py checking that
+# count_model's name is registered in ALGORITHM_SIMPLICITY_RANK at all.
+# These exercise the actual tie-break decision.
+# ---------------------------------------------------------------------
+
+def _result(algorithm: str, mae: float) -> AlgorithmResult:
+    return AlgorithmResult(algorithm=algorithm, mae=mae, rmse=mae * 1.2, mape=10.0, r2=0.5)
+
+
+def test_select_champion_picks_strict_lowest_mae_outside_tolerance():
+    """No tie: prophet's MAE is far enough below naive's that the
+    CHAMPION_TIE_TOLERANCE_PCT band doesn't reach it -- prophet wins
+    outright, regardless of simplicity rank."""
+    candidates = [_result("naive", mae=20.0), _result("prophet", mae=10.0)]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "prophet"
+    assert selection.ranked[0].algorithm == "prophet"
+    assert "practically tied" not in selection.reason
+
+
+def test_select_champion_prefers_simpler_algorithm_within_tolerance():
+    """The actual policy this task adds: prophet has the strictly lowest
+    raw MAE, but naive is within CHAMPION_TIE_TOLERANCE_PCT of it -- naive
+    should win because it's simpler (lower ALGORITHM_SIMPLICITY_RANK),
+    and the reason string should say so, not just report prophet as the
+    unqualified winner."""
+    best_mae = 10.0
+    within_tolerance_mae = best_mae * (1 + CHAMPION_TIE_TOLERANCE_PCT * 0.5)  # inside the band
+    candidates = [_result("prophet", mae=best_mae), _result("naive", mae=within_tolerance_mae)]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "naive"
+    assert selection.ranked[0].algorithm == "naive"  # ranked reflects actual selection order
+    assert "practically tied" in selection.reason
+    assert "naive" in selection.reason
+
+
+def test_select_champion_boundary_exactly_at_tolerance_counts_as_tied():
+    """Exactly at the tolerance boundary (not strictly inside it) must
+    still count as tied -- the comparison is <=, not <, so a candidate
+    landing precisely on the edge isn't excluded by a fencepost error."""
+    best_mae = 10.0
+    boundary_mae = best_mae * (1 + CHAMPION_TIE_TOLERANCE_PCT)
+    candidates = [_result("prophet", mae=best_mae), _result("naive", mae=boundary_mae)]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "naive"
+
+
+def test_select_champion_just_outside_tolerance_keeps_lowest_mae_winner():
+    """Just past the tolerance boundary, no tie applies -- the strictly
+    lower raw MAE wins even though the gap is small in absolute terms,
+    since the policy is a fixed percentage, not a vibe."""
+    best_mae = 10.0
+    just_outside_mae = best_mae * (1 + CHAMPION_TIE_TOLERANCE_PCT) + 0.01
+    candidates = [_result("prophet", mae=best_mae), _result("naive", mae=just_outside_mae)]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "prophet"
+    assert "practically tied" not in selection.reason
+
+
+def test_select_champion_zero_mae_only_ties_with_other_zeros():
+    """Degenerate-series edge case: when the best MAE is exactly 0, a
+    percentage tolerance band is also exactly 0 (0 * anything == 0) --
+    only another exactly-zero candidate should be treated as tied, never
+    a small-but-nonzero one, however small."""
+    candidates = [_result("naive", mae=0.0), _result("prophet", mae=0.001)]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "naive"
+    assert "practically tied" not in selection.reason
+
+
+def test_select_champion_multiple_algorithms_tied_picks_simplest_of_all():
+    """Three-way tie within tolerance: the simplest of ALL tied
+    candidates wins, not just a pairwise comparison against the raw
+    best -- naive (rank 0) beats both seasonal_naive (rank 1) and
+    prophet (rank 4) even though prophet has the strictly lowest MAE."""
+    best_mae = 10.0
+    candidates = [
+        _result("prophet", mae=best_mae),
+        _result("seasonal_naive", mae=best_mae * 1.02),
+        _result("naive", mae=best_mae * 1.04),
+    ]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "naive"
+    assert selection.ranked[0].algorithm == "naive"
+
+
+def test_select_champion_single_candidate_wins_trivially():
+    candidates = [_result("prophet", mae=5.0)]
+    selection = select_champion_algorithm(candidates)
+    assert selection.winner.algorithm == "prophet"
+    assert "only algorithm evaluated" in selection.reason
+
+
+def test_select_champion_raises_on_empty_candidates():
+    with pytest.raises(ValueError):
+        select_champion_algorithm([])

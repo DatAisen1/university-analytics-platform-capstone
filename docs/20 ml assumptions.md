@@ -55,6 +55,20 @@ walk-forward folds, and retraining comparisons order and partition by
 by a non-chronological surrogate key was an identified historical bug this
 convention specifically prevents.
 
+**Forecast horizon (P1.4, locked): next semester only.** Every deployed
+forecast predicts exactly one target period ahead — `deploy_forecast.py`
+builds a single-row future frame (`future = pd.DataFrame({"ds":
+[target_ds]})`), never a multi-step horizon. This isn't an incidental
+implementation detail; it's the project's stated objective (see
+`01_Project_Overview.md` §1: *"How many students should we expect to
+enroll, graduate, or drop out **next semester**?"*) and should be treated
+as load-bearing wherever this project's objectives are restated —
+Prophet's own multi-period forecasting capability (`make_future_dataframe`
+with `periods > 1`) is deliberately unused here. Forecasting 2+ semesters
+ahead is real, uncompleted future work, not an oversight — see
+`14_Future_Improvements.md` §2 for the trigger condition that would
+justify it.
+
 ## 3. Training Window
 
 - **Observed history:** 4 academic years (`2021-2022` through

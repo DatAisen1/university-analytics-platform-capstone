@@ -444,15 +444,16 @@ class AlgorithmResult:
     r2: float
 
 
-# Occam's-razor tie-break order when two algorithms' MAE is equal to
-# within floating-point precision -- lower rank wins. Ordered by how much
-# machinery each needs to produce its prediction: naive needs one stored
-# value, seasonal_naive needs one prior-season value, historical_avg needs
-# the full training mean, count_model fits a 2-3 parameter GLM (intercept
-# +trend, +dispersion under NB), prophet fits a full trend+seasonality
-# model with many more effective parameters. Not in
-# baselines.BASELINE_ALGORITHMS order because that tuple is unordered by
-# design; this ranking is a deliberate, separate decision.
+# Occam's-razor tie-break order when two algorithms' MAE is practically
+# equivalent (see CHAMPION_TIE_TOLERANCE_PCT below) -- lower rank wins.
+# Ordered by how much machinery each needs to produce its prediction:
+# naive needs one stored value, seasonal_naive needs one prior-season
+# value, historical_avg needs the full training mean, count_model fits a
+# 2-3 parameter GLM (intercept +trend, +dispersion under NB), prophet
+# fits a full trend+seasonality model with many more effective
+# parameters. Not in baselines.BASELINE_ALGORITHMS order because that
+# tuple is unordered by design; this ranking is a deliberate, separate
+# decision.
 ALGORITHM_SIMPLICITY_RANK = {
     "naive": 0,
     "seasonal_naive": 1,
@@ -460,6 +461,23 @@ ALGORITHM_SIMPLICITY_RANK = {
     "count_model": 3,
     "prophet": 4,
 }
+
+# P1.1 (Model Selection Robustness): a fixed engineering policy decision,
+# not a statistically derived value -- there is no hypothesis test or
+# confidence interval behind "5%". The reasoning is purely practical: a
+# program's actual enrollment or graduation count is an integer, walk-
+# forward MAE is computed over as few as 3 test folds, and this project's
+# real series span MAE values from well under 1 up to the 50s (see
+# forecasting/artifacts/evaluation_report.md). A FIXED absolute tolerance
+# (e.g. "within 0.5") would be meaningless noise-floor slack for a
+# large-enrollment program and absurdly generous for a small one; a
+# PERCENTAGE of the best candidate's own MAE scales with the series
+# instead. 5% was picked as a round, defensible "these predictions are
+# indistinguishable in practice" band -- not backed by any statistical
+# procedure, and deliberately named/commented as policy so nobody mistakes
+# it for one. Change this constant, not the tie-break logic, if the
+# policy should be stricter or looser.
+CHAMPION_TIE_TOLERANCE_PCT = 0.05
 
 
 @dataclass(frozen=True)
@@ -477,8 +495,27 @@ def select_champion_algorithm(candidates: Sequence[AlgorithmResult]) -> Champion
     """Option B's core decision: out of EVERY algorithm actually evaluated
     this cycle for a series, which one wins? Prophet is not privileged --
     it wins only when it genuinely has the lowest walk-forward MAE among
-    whatever was evaluated. Ties (MAE equal within 1e-6) go to the
-    simpler algorithm per ALGORITHM_SIMPLICITY_RANK.
+    whatever was evaluated. Candidates within CHAMPION_TIE_TOLERANCE_PCT
+    of the best MAE are treated as practically equivalent and the tie
+    goes to the simpler algorithm per ALGORITHM_SIMPLICITY_RANK -- see
+    that constant's comment for why this is a fixed policy percentage,
+    not a statistically derived one.
+
+    Tolerance is applied relative to the single lowest MAE among the
+    candidates (not pairwise between every pair), so "practically tied
+    with the winner" is transitive by construction: if B is within
+    tolerance of the best (A) and C is within tolerance of the best,
+    B and C are both in the tied group even if they happen to differ
+    from each other by slightly more than the tolerance -- the
+    reference point is always the best candidate, never a chain of
+    pairwise comparisons that could drift.
+
+    Zero-MAE edge case: if the best candidate's MAE is exactly 0 (a
+    degenerate series predicted perfectly, e.g. an all-zero actuals
+    series), a percentage tolerance of 0 is meaningless -- 0 * (1.05) is
+    still 0. Only other exactly-zero-MAE candidates are treated as tied
+    in that case, which is the correct, intuitive behavior (nothing
+    "close to a perfect fit" should out-rank an actual perfect fit).
 
     Callers are responsible for excluding any algorithm with an undefined
     MAE before calling this (e.g. seasonal_naive with zero eligible
@@ -491,15 +528,34 @@ def select_champion_algorithm(candidates: Sequence[AlgorithmResult]) -> Champion
     if not candidates:
         raise ValueError("select_champion_algorithm requires at least one candidate")
 
-    def sort_key(c: AlgorithmResult) -> Tuple[float, int]:
-        return (round(c.mae, 6), ALGORITHM_SIMPLICITY_RANK.get(c.algorithm, 99))
+    by_mae = sorted(candidates, key=lambda c: c.mae)
+    best_mae = by_mae[0].mae
+    tolerance_band = best_mae * CHAMPION_TIE_TOLERANCE_PCT
 
-    ranked = tuple(sorted(candidates, key=sort_key))
-    winner = ranked[0]
+    tied = [c for c in by_mae if c.mae <= best_mae + tolerance_band]
+    tied.sort(key=lambda c: ALGORITHM_SIMPLICITY_RANK.get(c.algorithm, 99))
+    winner = tied[0]
+
+    # "ranked" is the actual selection order (winner first, per the
+    # ChampionSelection docstring's "best-to-worst"), not raw-MAE order --
+    # those differ exactly when tolerance picked a simpler algorithm over
+    # the strictly-lowest-MAE one.
+    ranked = tuple([winner] + [c for c in by_mae if c is not winner])
     others = ranked[1:]
     if others:
         detail = "; ".join(f"{c.algorithm} MAE {c.mae:.4f}" for c in others)
-        reason = f"{winner.algorithm} wins this cycle with MAE {winner.mae:.4f}, ahead of {detail}"
+        if len(tied) > 1:
+            tied_detail = ", ".join(
+                f"{c.algorithm} (MAE {c.mae:.4f})" for c in tied if c is not winner
+            )
+            reason = (
+                f"{winner.algorithm} wins this cycle with MAE {winner.mae:.4f} -- "
+                f"practically tied (within {CHAMPION_TIE_TOLERANCE_PCT:.0%} of the best "
+                f"MAE {best_mae:.4f}) with {tied_detail}, so the simpler algorithm per "
+                f"ALGORITHM_SIMPLICITY_RANK was chosen; also ahead of {detail}"
+            )
+        else:
+            reason = f"{winner.algorithm} wins this cycle with MAE {winner.mae:.4f}, ahead of {detail}"
     else:
         reason = f"{winner.algorithm} is the only algorithm evaluated this cycle (MAE {winner.mae:.4f})"
     return ChampionSelection(winner=winner, reason=reason, ranked=ranked)

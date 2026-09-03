@@ -101,29 +101,51 @@ SEASON_LENGTH = 2
 # uncertainty into yhat_lower/yhat_upper, not observation-noise
 # uncertainty -- on this project's real fold sizes, a live-regenerated
 # evaluation_report.md showed the true value missed the stated 80%
-# interval in ALL 3 walk-forward folds for 72% of series (53/74). Full
-# MCMC sampling (mcmc_samples>0) fixes that statistically, but a
-# from-scratch benchmark against this project's actual fold sizes (3-9
-# training points, semester-grain) showed MCMC itself is unreliable at
-# the small end: repeated fits at n=3-5 training points showed 5-46%
-# divergent transitions per chain (and twice, non-fatal Stan numerical
-# errors -- "Matrix of independent variables is inf", "Scale vector is
-# 0"), while n>=7 showed 0% divergence across 9 varied trials (different
-# trends/noise levels). A sampler with double-digit divergence hasn't
-# actually explored the posterior -- per Stan's own diagnostics
-# guidance, ANY divergent transition means the result is suspect, not
-# just a high divergence rate -- so turning MCMC on everywhere would
-# trade one kind of miscalibrated interval for another.
+# interval in ALL 3 walk-forward folds for 72% of series (53/74).
 #
-# Hybrid resolution, implemented in fit_prophet(): attempt full Bayesian
-# sampling only once a series' training window reaches
-# MCMC_MIN_TRAIN_POINTS, and ALWAYS verify convergence afterward via
-# CmdStan's own per-chain divergence count rather than trusting the size
-# threshold alone. A fit below the threshold, or one that diverges
-# despite clearing it, falls back to the fast MAP-only fit
-# (mcmc_samples=0) and is explicitly flagged NOT calibrated -- see
-# IntervalCalibration below -- so nothing downstream mistakes a
-# disclosed interval for a statistically calibrated one.
+# CORRECTED, 2nd pass (docs/22_Interval_Calibration_Resolution.md's
+# addendum has the full writeup): an initial from-scratch benchmark
+# claimed full MCMC sampling (mcmc_samples>0) fixed this cleanly once a
+# fold's training window reached n=7, with "0% divergence across 9
+# varied trials" at n>=7. That claim did not hold up. A REAL, real-CmdStan
+# reproduction (scripts/diagnose_mcmc_divergence.py) at this project's
+# actual achievable fold sizes -- n=7, 8, and 9, which is the entire
+# range this project's walk-forward design can ever produce, since every
+# fold trains on "everything up to the test point" and the dataset caps
+# at 10 periods -- showed substantial divergence at EVERY size, not just
+# the small end:
+#   n=7: 71 total divergent transitions across 4 chains (worst chain 29.3%)
+#   n=8: 54 total divergent transitions across 4 chains (worst chain 22.0%)
+#   n=9: 44 total divergent transitions across 4 chains (worst chain 17.3%)
+# all showing the same non-fatal Stan numerical errors ("Matrix of
+# independent variables is inf", "Scale vector is 0") the original
+# benchmark said were confined to n=3-5. Divergence trends downward with
+# n, but never remotely approaches zero within the range this project can
+# reach. Per Stan's own diagnostics guidance, ANY divergent transition
+# means the posterior wasn't actually explored -- so there is no fold
+# size in this project, today, at which a genuinely MCMC-calibrated
+# interval is achievable.
+#
+# Decision: MCMC_CALIBRATION_ENABLED = False. Every fit_prophet() call
+# now does a MAP-only fit, honestly and by design -- not as a fallback
+# from a mechanism that never actually succeeds. The threshold/
+# convergence-verification machinery below (MCMC_MIN_TRAIN_POINTS,
+# _mcmc_divergent_transitions, the mcmc-sampling branch inside
+# fit_prophet) is kept, not deleted: it's real, tested code, and flipping
+# MCMC_CALIBRATION_ENABLED back to True re-activates it unchanged, should
+# either (a) the dataset's observed window ever grow well past 10
+# periods, giving folds enough training points to plausibly converge, or
+# (b) someone tunes Prophet's priors (e.g. a tighter
+# changepoint_prior_scale, which controls exactly the kind of
+# ill-conditioned trend flexibility "Matrix of independent variables is
+# inf" points at) and re-benchmarks with
+# scripts/diagnose_mcmc_divergence.py before trusting it again. Until
+# then, every yhat_lower/yhat_upper in this project's Prophet output is a
+# disclosed MAP-only approximation -- see IntervalCalibration below --
+# and every consumer of it (evaluation reports, deployed forecasts)
+# should treat it as such, not as a statistically calibrated interval
+# that merely rounds down to a coverage report.
+MCMC_CALIBRATION_ENABLED = False
 MCMC_SAMPLES = 300
 MCMC_MIN_TRAIN_POINTS = 7
 
@@ -373,6 +395,15 @@ def fit_prophet(train_df: pd.DataFrame):
     working unmodified -- callers that care read the attribute; callers
     that don't (most of them: they just need a `.predict()`-able model)
     are unaffected.
+
+    MCMC_CALIBRATION_ENABLED = False (see that constant's comment,
+    above): as of the 2nd-pass correction, this means every call takes
+    the MAP-only path below, regardless of n_train. The
+    n_train < MCMC_MIN_TRAIN_POINTS branch and the real-MCMC branch are
+    both still reachable and tested -- they only require flipping that
+    one constant -- but neither is exercised by default anymore, since
+    real measurement (scripts/diagnose_mcmc_divergence.py) showed MCMC
+    doesn't reliably converge at any fold size this project can produce.
     """
     from prophet import Prophet
 
@@ -391,6 +422,18 @@ def fit_prophet(train_df: pd.DataFrame):
         return m
 
     try:
+        if not MCMC_CALIBRATION_ENABLED:
+            return _map_fit(
+                "MCMC calibration disabled project-wide "
+                "(MCMC_CALIBRATION_ENABLED=False) -- real measurement via "
+                "scripts/diagnose_mcmc_divergence.py showed 44-71 divergent "
+                "transitions across chains at every fold size this project "
+                "can produce (n=7, 8, 9), contradicting the threshold this "
+                "was originally set against; see the comment on "
+                "MCMC_CALIBRATION_ENABLED and "
+                "docs/22_Interval_Calibration_Resolution.md"
+            )
+
         if n_train < MCMC_MIN_TRAIN_POINTS:
             return _map_fit(
                 f"training window too short for stable MCMC sampling "
