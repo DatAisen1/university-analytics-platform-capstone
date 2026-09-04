@@ -170,6 +170,47 @@ def _semester_to_date(academic_year: int, semester_number: int) -> str:
     return f"{academic_year}-{month_day}"
 
 
+# P1 (forecasting-layer review follow-up): kept in sync BY HAND with the
+# CHECK constraint added by migrations/versions/0018_forecast_interval_
+# calibration.py -- Postgres has no mechanism here to derive its allowed-
+# values list from this module, so a future change to either side must
+# update the other. See that migration's module docstring for the full
+# rationale behind these four specific values.
+INTERVAL_CALIBRATION_BAYESIAN_MCMC = "bayesian_mcmc"
+INTERVAL_CALIBRATION_MAP_DISCLOSED = "map_disclosed"
+INTERVAL_CALIBRATION_COUNT_QUANTILE = "count_quantile"
+INTERVAL_CALIBRATION_DEGENERATE = "degenerate_zero_width"
+
+
+def _interval_calibration_for(algorithm: str, model) -> tuple[str, Optional[str]]:
+    """What does this deployed model's (yhat_lower, yhat_upper) actually
+    mean? Returns (method, note) for persistence onto gold.fact_forecast
+    (migration 0018) -- previously this was only logged to console (see
+    the comment this replaced in _build_champion_model below) and never
+    reached the table a dashboard or stakeholder query would read, so a
+    consumer had no way to distinguish a genuinely calibrated interval
+    from a disclosed approximation.
+
+    Covers every algorithm _build_champion_model can dispatch to.
+    Anything else is a programming error (a new algorithm added to
+    select_champion_algorithm without updating this function), not a
+    data condition -- it raises rather than returning a value the
+    migration 0018 CHECK constraint would reject anyway, so the failure
+    surfaces here with a clear cause instead of as an opaque DB error.
+    """
+    if algorithm == "prophet":
+        calibration = getattr(model, "_interval_calibration", None)
+        if calibration is not None and calibration.calibrated:
+            return INTERVAL_CALIBRATION_BAYESIAN_MCMC, None
+        reason = calibration.reason if calibration is not None else "no calibration metadata attached to model"
+        return INTERVAL_CALIBRATION_MAP_DISCLOSED, reason
+    if algorithm == "count_model":
+        return INTERVAL_CALIBRATION_COUNT_QUANTILE, model.detail
+    if algorithm in ("naive", "historical_avg", "seasonal_naive"):
+        return INTERVAL_CALIBRATION_DEGENERATE, None
+    raise ValueError(f"no interval calibration mapping defined for algorithm {algorithm!r}")
+
+
 def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: str, target_period_ordinal: int):
     """Option B: build the deployable model object for whichever algorithm
     won champion selection this cycle, and the training record count to
@@ -178,7 +219,9 @@ def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: 
     regardless of algorithm -- Prophet's own model for 'prophet',
     models.forecasting.count_model.CountModel (real Poisson/NB quantile
     interval, see that module's docstring) for 'count_model', and
-    baselines.BaselineModel (degenerate interval) for anything else.
+    baselines.BaselineModel (degenerate interval) for anything else. Pass
+    (algorithm, model) to _interval_calibration_for() to classify what
+    the returned interval actually means before persisting it.
 
     Raises ValueError only for 'seasonal_naive' with no training value at
     the required prior-season period_ordinal -- the caller
@@ -191,20 +234,14 @@ def _build_champion_model(algorithm: str, program_series: pd.DataFrame, metric: 
     if algorithm == "prophet":
         train_df = to_prophet_frame(program_series, metric)
         model = fit_prophet(train_df)
-        # P0 Gate Follow-Up 22.1: fit_prophet attaches whether this
-        # deployed model's interval is genuinely MCMC-calibrated or a
-        # disclosed MAP-only fallback (model._interval_calibration).
-        # Logged here so it's visible in deploy_forecasts' output today;
-        # NOT YET persisted onto gold.fact_forecast itself -- that needs
-        # a schema column and migration, tracked as open follow-up in
-        # docs/22_Interval_Calibration_Resolution.md, not done in this
-        # change so this diff stays reviewable against a real database.
-        calibration = getattr(model, "_interval_calibration", None)
-        if calibration is not None and not calibration.calibrated:
-            logger.info(
-                "%s/%s deployed forecast interval NOT MCMC-calibrated: %s",
-                metric, algorithm, calibration.reason,
-            )
+        # P0 Gate Follow-Up 22.1 / P1 forecasting-layer review follow-up:
+        # fit_prophet attaches whether this deployed model's interval is
+        # genuinely MCMC-calibrated or a disclosed MAP-only fallback
+        # (model._interval_calibration). Read by the caller via
+        # _interval_calibration_for() right after this returns, and from
+        # there persisted onto gold.fact_forecast (migration 0018) --
+        # previously this was only logged to console and never reached
+        # the table a dashboard or stakeholder query would actually read.
         return model, len(train_df)
 
     period_ordinals = program_series["period_ordinal"].tolist()
@@ -231,6 +268,8 @@ def _write_forecast_row(
     yhat: float,
     yhat_lower: float,
     yhat_upper: float,
+    interval_calibration_method: str,
+    interval_calibration_note: Optional[str],
 ) -> None:
     conn = engine.raw_connection()
     try:
@@ -240,9 +279,10 @@ def _write_forecast_row(
                 INSERT INTO gold.fact_forecast (
                     program_key, college_key, metric, target_academic_year, target_semester_number,
                     target_period_ordinal, model_registry_key, model_version,
-                    yhat, yhat_lower, yhat_upper, forecast_grain
+                    yhat, yhat_lower, yhat_upper, forecast_grain,
+                    interval_calibration_method, interval_calibration_note
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'program')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'program', %s, %s)
                 -- Targets ux_fact_forecast_program_grain (migration 0016) explicitly:
                 -- a partial unique index requires its WHERE predicate repeated here,
                 -- Postgres will not infer it from the index definition alone.
@@ -252,6 +292,8 @@ def _write_forecast_row(
                     yhat = EXCLUDED.yhat,
                     yhat_lower = EXCLUDED.yhat_lower,
                     yhat_upper = EXCLUDED.yhat_upper,
+                    interval_calibration_method = EXCLUDED.interval_calibration_method,
+                    interval_calibration_note = EXCLUDED.interval_calibration_note,
                     generated_at = now()
                 """,
                 (
@@ -266,6 +308,8 @@ def _write_forecast_row(
                     yhat,
                     yhat_lower,
                     yhat_upper,
+                    interval_calibration_method,
+                    interval_calibration_note,
                 ),
             )
         conn.commit()
@@ -489,6 +533,16 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
 
                 yhat, yhat_lower, yhat_upper = _forecast_next_period(model, target_ds)
 
+                interval_calibration_method, interval_calibration_note = _interval_calibration_for(
+                    selection.winner.algorithm, model,
+                )
+                if interval_calibration_method != INTERVAL_CALIBRATION_BAYESIAN_MCMC:
+                    logger.info(
+                        "%s/%s deployed forecast interval is %s%s",
+                        program_id, metric, interval_calibration_method,
+                        f" ({interval_calibration_note})" if interval_calibration_note else "",
+                    )
+
                 _write_forecast_row(
                     engine,
                     program_key=program_key,
@@ -502,6 +556,8 @@ def deploy_forecasts(engine, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Lis
                     yhat=yhat,
                     yhat_lower=yhat_lower,
                     yhat_upper=yhat_upper,
+                    interval_calibration_method=interval_calibration_method,
+                    interval_calibration_note=interval_calibration_note,
                 )
                 logger.info(
                     "Promoted %s (algorithm=%s, MAE %.4f): forecast %.2f for %s-%s",

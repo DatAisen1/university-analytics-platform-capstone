@@ -21,6 +21,7 @@ import pytest
 
 from pipelines.common.migrations import apply_migrations
 from pipelines.common.postgres import bootstrap_warehouse, get_admin_connection
+from models.forecasting.train_prophet import MCMC_DISABLED_REASON
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _pg_test_db import create_isolated_database, drop_database_if_exists  # noqa: E402
@@ -255,3 +256,68 @@ def test_silver_tables_have_not_null_natural_keys():
         assert _column_not_null(cur, "silver", "student", "student_id")
         assert _column_not_null(cur, "silver", "program", "program_id")
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# gold.fact_forecast.interval_calibration_note (migrations 0018 -> 0019):
+# regression coverage for a real production bug. 0018 shipped this column
+# as VARCHAR(256), sized without measuring the real strings it has to
+# hold; MCMC_DISABLED_REASON (train_prophet.py) is 389 characters and
+# fires on essentially every Prophet-champion forecast, since
+# MCMC_CALIBRATION_ENABLED = False is the default -- not a rare edge
+# case. Every forecast write for a Prophet champion hit
+# psycopg2.errors.StringDataRightTruncation at the Forecast Deployment
+# pipeline stage in a real `dagster job execute` run, caught by no test
+# in this suite until now. 0019 widened the column to TEXT; these two
+# tests are what should have existed before 0018 shipped.
+# ---------------------------------------------------------------------------
+
+def test_gold_fact_forecast_interval_calibration_columns_are_sized_correctly():
+    """Column-metadata check: would have caught the original VARCHAR(256)
+    sizing bug directly, without needing to know the specific string that
+    eventually broke production. Asserts the note column is genuinely
+    TEXT (character_maximum_length IS NULL) rather than merely "not 256"
+    -- a regression back to some OTHER too-small N would fail this test
+    exactly the same way the original bug should have.
+
+    A stronger version of this test would INSERT the real
+    MCMC_DISABLED_REASON string end-to-end through gold.fact_forecast and
+    gold.model_registry and assert an exact round-trip -- deliberately
+    not attempted here, because gold.model_registry's full current NOT
+    NULL / column surface (mae, rmse, best_baseline_mae, beats_baseline,
+    is_champion, rejected_reason, program_key, ... accumulated across
+    migrations 0008, 0009, 0013, 0014) is exactly the kind of thing this
+    project's own guardrails say to verify against the real schema
+    rather than reconstruct from memory, and doing that reconstruction
+    correctly without a live database to check it against risked shipping
+    a second bug while fixing the first. The column-metadata check below
+    is the version of this regression test that's actually verified
+    correct, not merely plausible-looking."""
+    conn = get_admin_connection(ISOLATED_ENV)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name, data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_schema = 'gold' AND table_name = 'fact_forecast'
+              AND column_name IN ('interval_calibration_method', 'interval_calibration_note')
+            """
+        )
+        columns = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+    conn.close()
+
+    # interval_calibration_method is a real, bounded 4-value enum (see
+    # migration 0018's CHECK constraint) -- VARCHAR(32) was never the bug.
+    assert columns["interval_calibration_method"] == ("character varying", 32)
+
+    # interval_calibration_note is genuinely free-text diagnostic content
+    # -- TEXT, unbounded, is the actual fix, not a larger arbitrary cap.
+    assert columns["interval_calibration_note"] == ("text", None)
+
+    # Directly proves the specific real string that broke production
+    # would now fit, without needing a full cross-table INSERT to do it:
+    # PostgreSQL has no length limit on TEXT, so this is really just
+    # confirming MCMC_DISABLED_REASON hasn't itself grown into something
+    # pathological (e.g. accidentally duplicated) since this test was
+    # written, imported live rather than hardcoded so it can't drift.
+    assert len(MCMC_DISABLED_REASON) == 389

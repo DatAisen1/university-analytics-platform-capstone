@@ -17,9 +17,11 @@ trusted as a mathematical fact this test merely restates.
 
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import pytest
 import statsmodels.api as sm
+from scipy import stats
 
 from models.forecasting.count_model import (
     ALGORITHM_NAME,
@@ -124,6 +126,49 @@ def test_step_change_series_extrapolation_is_capped_not_explosive():
     # The underlying algorithm choice (NB, given real overdispersion here)
     # must still be visible in detail, not overwritten by the cap note.
     assert result.detail.startswith("negative_binomial_glm")
+
+
+# --- Defensive hardening: non-finite output (P2, forecasting-layer review) ---
+
+def test_non_finite_mu_hat_falls_back_to_sample_mean():
+    """Regression test for the guard the extrapolation cap structurally
+    cannot provide: `NaN > extrapolation_cap` is always False (unlike
+    `inf > extrapolation_cap`, which the cap already catches), so a NaN
+    prediction would otherwise slip past the cap unmodified. Forces the
+    fitted GLM's own .predict() to return NaN directly -- the most
+    faithful way to reproduce "the fit converged but the resulting
+    prediction is unusable" without needing to actually engineer a
+    numerically pathological design matrix -- and asserts the guard
+    replaces it with the plain sample mean, recording this in `detail`."""
+    y = [1.0, 2.0, 3.0, 4.0]
+    x = [0, 1, 2, 3]
+    real_fit = sm.GLM(y, sm.add_constant(np.array(x, dtype=float)), family=sm.families.Poisson()).fit()
+
+    with patch.object(sm.GLM, "fit", return_value=real_fit), \
+         patch.object(real_fit, "predict", return_value=np.array([float("nan")])):
+        result = fit_and_predict_count_model(x, y, target_period_ordinal=4)
+
+    assert result.yhat == pytest.approx(2.5, abs=1e-6)  # mean([1,2,3,4])
+    assert "non-finite-guarded" in result.detail
+
+
+def test_non_finite_interval_bounds_collapse_to_degenerate_zero_width():
+    """Companion guard to the mu_hat one above, for the interval side:
+    if the quantile computation (NB's r/p reparameterization, or a
+    Poisson ppf call) ever returns a non-finite bound, this must not
+    propagate a NaN/inf interval into a deployed forecast row -- it
+    should collapse to a zero-width interval at the (already-validated
+    finite) point forecast, the same 'no principled uncertainty
+    available' signal baselines.BaselineModel already uses deliberately
+    elsewhere in this codebase, not a fabricated band."""
+    y = [1.0, 2.0, 3.0, 4.0]
+    x = [0, 1, 2, 3]
+
+    with patch.object(stats.poisson, "ppf", return_value=float("nan")):
+        result = fit_and_predict_count_model(x, y, target_period_ordinal=4)
+
+    assert result.yhat_lower == result.yhat_upper == result.yhat
+    assert "interval-guarded" in result.detail
 
 
 # --- Overdispersion -> Negative Binomial fallback ---

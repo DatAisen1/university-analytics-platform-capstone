@@ -159,6 +159,13 @@ class CountModelFit:
     yhat_lower: float
     yhat_upper: float
     detail: str  # "poisson_glm" | "poisson_glm(degenerate-zero)" | "negative_binomial_glm"
+    # -- plus optional composable suffixes appended by later guards in this
+    # function: "(extrapolation-capped)" (mu_hat exceeded the series' own
+    # observed-volatility cap), "(non-finite-guarded)" (mu_hat came back
+    # NaN/inf and was replaced by the sample mean), "(interval-guarded)"
+    # (yhat_lower/yhat_upper came back non-finite and were collapsed to a
+    # degenerate zero-width interval at yhat). More than one suffix can
+    # appear on the same fit, e.g. "poisson_glm(extrapolation-capped)".
     dispersion_ratio: Optional[float]  # None only for the degenerate-zero case
     n_train: int
 
@@ -266,6 +273,29 @@ def fit_and_predict_count_model(
     mu_hat = float(fit_result.predict(target_design)[0])
     mu_hat = max(mu_hat, 0.0)
 
+    # Defensive hardening (P2, forecasting-layer review follow-up --
+    # docs/10_Forecasting.md SS9.2's "known gap" note, now closed).
+    # Verified directly: `max(float('nan'), 0.0)` stays NaN, and
+    # `float('nan') > extrapolation_cap` is False -- so an Inf prediction
+    # (e.g. from log-link coefficient overflow) is already caught by the
+    # cap just below (`inf > finite_cap` is True), but a NaN prediction
+    # would silently pass that same comparison and propagate all the way
+    # into a walk-forward MAE average or a deployed forecast row. Not
+    # observed against this project's real data as of this fix, but it's
+    # the same failure *shape* -- a converged-looking fit producing an
+    # unusable number nothing downstream catches -- that produced the
+    # previously observed hundreds-of-millions count_model_mae values
+    # before the extrapolation cap below was added, just via the one
+    # numeric path (NaN, not Inf) that cap structurally can't cover.
+    # Falls back to the plain sample mean, the same fail-soft target the
+    # intercept-only branch already uses when there isn't enough
+    # information to fit a trend at all -- "the fit produced nonsense" is
+    # treated the same as "there wasn't enough data to fit anything more
+    # sophisticated," not as a special case needing new machinery.
+    if not np.isfinite(mu_hat):
+        mu_hat = float(np.mean(y))
+        detail = f"{detail}(non-finite-guarded)"
+
     # Extrapolation guardrail, trend branch only (intercept-only's mu_hat
     # is the fitted mean regardless of target_period_ordinal -- it cannot
     # blow up this way, so it's structurally exempt). A log-link GLM
@@ -308,6 +338,21 @@ def fit_and_predict_count_model(
     else:
         yhat_lower = float(stats.poisson.ppf(0.1, mu_hat)) if mu_hat > 0 else 0.0
         yhat_upper = float(stats.poisson.ppf(0.9, mu_hat)) if mu_hat > 0 else 0.0
+
+    # Defensive hardening (P2, same follow-up as the mu_hat guard above):
+    # the NB branch's r/p reparameterization divides by (var_hat - mu_hat),
+    # which is well-behaved whenever alpha is the finite, positive value
+    # already checked above, but a belt-and-suspenders check here means a
+    # future change to this branch (e.g. a different overdispersion
+    # estimator) can't silently ship a NaN/inf interval bound the way an
+    # unguarded mu_hat previously could. Falls back to a degenerate
+    # zero-width interval at the (already-validated finite) point
+    # forecast -- the same "no principled uncertainty available" signal
+    # baselines.BaselineModel already uses deliberately, not a fabricated
+    # band.
+    if not (np.isfinite(yhat_lower) and np.isfinite(yhat_upper)):
+        yhat_lower = yhat_upper = mu_hat
+        detail = f"{detail}(interval-guarded)"
 
     return CountModelFit(
         yhat=mu_hat, yhat_lower=yhat_lower, yhat_upper=yhat_upper,

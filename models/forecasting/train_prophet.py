@@ -149,6 +149,28 @@ MCMC_CALIBRATION_ENABLED = False
 MCMC_SAMPLES = 300
 MCMC_MIN_TRAIN_POINTS = 7
 
+# Extracted to a named constant (P1 forecasting-layer review follow-up,
+# migration 0019's regression test) rather than left inline inside
+# fit_prophet() below: this is the specific string that broke production
+# when migration 0018 first sized gold.fact_forecast.interval_calibration_note
+# as VARCHAR(256) without measuring it -- at 389 characters, comfortably
+# over that limit, and it fires on essentially every Prophet-champion
+# forecast (MCMC_CALIBRATION_ENABLED = False is the default, not a rare
+# edge case). A named constant lets tests/integration/test_database_
+# constraints.py assert against the REAL string rather than a hand-typed
+# copy that could silently drift from what fit_prophet() actually sends
+# to the database the next time this message is edited.
+MCMC_DISABLED_REASON = (
+    "MCMC calibration disabled project-wide "
+    "(MCMC_CALIBRATION_ENABLED=False) -- real measurement via "
+    "scripts/diagnose_mcmc_divergence.py showed 44-71 divergent "
+    "transitions across chains at every fold size this project "
+    "can produce (n=7, 8, 9), contradicting the threshold this "
+    "was originally set against; see the comment on "
+    "MCMC_CALIBRATION_ENABLED and "
+    "docs/22_Interval_Calibration_Resolution.md"
+)
+
 
 @dataclass
 class IntervalCalibration:
@@ -423,16 +445,7 @@ def fit_prophet(train_df: pd.DataFrame):
 
     try:
         if not MCMC_CALIBRATION_ENABLED:
-            return _map_fit(
-                "MCMC calibration disabled project-wide "
-                "(MCMC_CALIBRATION_ENABLED=False) -- real measurement via "
-                "scripts/diagnose_mcmc_divergence.py showed 44-71 divergent "
-                "transitions across chains at every fold size this project "
-                "can produce (n=7, 8, 9), contradicting the threshold this "
-                "was originally set against; see the comment on "
-                "MCMC_CALIBRATION_ENABLED and "
-                "docs/22_Interval_Calibration_Resolution.md"
-            )
+            return _map_fit(MCMC_DISABLED_REASON)
 
         if n_train < MCMC_MIN_TRAIN_POINTS:
             return _map_fit(
@@ -977,6 +990,35 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
         )
         lines.append("")
 
+    # Computed here (moved up from just above the per-row loop) because
+    # the P3 footnote below needs it before the table header is written.
+    has_count_model_col = "count_model_mae" in report_df.columns
+
+    # P3 (forecasting-layer review follow-up): `count_model` is reported
+    # in its own column as a fourth CANDIDATE algorithm (Option B, SS7 of
+    # docs/10_Forecasting.md) -- it is never folded into `best_baseline_mae`,
+    # which is deliberately scoped to the three Section-5 baselines (naive,
+    # historical-average, seasonal-naive) that predate Option B. This means
+    # a row can show a lower `Count Model MAE` than `Best Baseline MAE`
+    # without that being a bug or an inconsistency -- it is simply a
+    # different column answering a different question ("did a candidate
+    # beat baselines" vs. "which candidate actually won champion
+    # selection", the latter decided by `select_champion_algorithm()`
+    # against ALL four algorithms, count_model included). Stated here once
+    # rather than left for a reader to work out by subtracting two columns.
+    if has_count_model_col:
+        lines.append(
+            "*Note: `Count Model MAE` is reported for reference as a fourth "
+            "candidate algorithm (Option B, \u00a77) and is excluded from `Best "
+            "Baseline MAE`, which is scoped to the three baselines defined in "
+            "\u00a75 (naive, historical-average, seasonal-naive). A row where "
+            "`Count Model MAE` is lower than `Best Baseline MAE` is not an "
+            "error -- champion selection (`select_champion_algorithm()`) "
+            "compares all four algorithms directly and is not driven by this "
+            "column.*"
+        )
+        lines.append("")
+
     lines += [
         "| Program | College | Metric | Prophet MAE | Prophet RMSE | 80% Interval Coverage | "
         "Mean Interval Width | Normalized Width | Interval Calibration | Naive MAE | Hist. Avg MAE | "
@@ -994,7 +1036,6 @@ def write_evaluation_report(report_df: pd.DataFrame, artifacts_dir: Path = DEFAU
     # but graduation_count with zero successful folds, or an
     # enrollment_count row -- count_model is only ever fit for
     # graduation_count, see walk_forward_evaluate).
-    has_count_model_col = "count_model_mae" in report_df.columns
     for _, row in report_df.iterrows():
         flag = "\u2705" if row["prophet_beats_best_baseline"] else "\u26a0\ufe0f NO"
         # seasonal_naive_mae is legitimately NaN for a series with no

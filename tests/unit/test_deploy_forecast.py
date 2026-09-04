@@ -214,6 +214,16 @@ def test_deploy_forecasts_writes_forecast_row_and_marks_promoted_when_candidate_
     for call in patched_fit_and_record:
         assert call["yhat"] == 50.0
         assert call["target_period_ordinal"] == 8  # next period after the 8 observed (ordinals 0-7)
+        # P1 (forecasting-layer review follow-up): _FakeModel carries no
+        # _interval_calibration attribute (same as every fit_prophet stub
+        # in this file), the realistic shape for a model object that
+        # predates fit_prophet's own calibration tracking or where it was
+        # never attached for some other reason -- _interval_calibration_for
+        # must fail soft into map_disclosed with an explanatory note, not
+        # raise or silently write None into a NOT-NULL-by-CHECK-constraint
+        # column (migration 0018).
+        assert call["interval_calibration_method"] == deploy_forecast.INTERVAL_CALIBRATION_MAP_DISCLOSED
+        assert call["interval_calibration_note"] == "no calibration metadata attached to model"
 
 
 def test_deploy_forecasts_writes_model_artifact_to_disk_even_when_rejected(
@@ -337,6 +347,13 @@ def test_deploy_forecasts_deploys_a_baseline_champion_when_it_wins_the_cycle(
 
     for call in patched_fit_and_record:
         assert call["yhat_lower"] == call["yhat_upper"] == call["yhat"]  # degenerate CI, as documented
+        # P1 companion assertion: the persisted calibration method must
+        # match the algorithm that actually won this cycle (naive), not
+        # be left over from some other code path -- a baseline's interval
+        # is degenerate BY DESIGN, not a disclosed approximation, so it
+        # gets its own distinct value rather than reusing map_disclosed.
+        assert call["interval_calibration_method"] == deploy_forecast.INTERVAL_CALIBRATION_DEGENERATE
+        assert call["interval_calibration_note"] is None
 
     # model_version carries the winning algorithm, not a hardcoded 'prophet'
     assert all("naive" in r.model_version for r in results)
@@ -394,3 +411,62 @@ def test_build_champion_model_seasonal_naive_raises_when_lookback_is_missing(tmp
         deploy_forecast._build_champion_model(
             "seasonal_naive", program_series, "enrollment_count", target_period_ordinal=100,
         )
+
+
+# --------------------------------------------------------------------------
+# _interval_calibration_for (P1, forecasting-layer review follow-up)
+# --------------------------------------------------------------------------
+
+def test_interval_calibration_for_prophet_genuinely_calibrated():
+    calibration = SimpleNamespace(calibrated=True, method="bayesian_mcmc", reason="converged cleanly")
+    model = SimpleNamespace(_interval_calibration=calibration)
+    method, note = deploy_forecast._interval_calibration_for("prophet", model)
+    assert method == deploy_forecast.INTERVAL_CALIBRATION_BAYESIAN_MCMC
+    # A genuinely calibrated interval needs no further explanation --
+    # the note column stays reserved for explaining fallbacks/details.
+    assert note is None
+
+
+def test_interval_calibration_for_prophet_map_disclosed():
+    calibration = SimpleNamespace(
+        calibrated=False, method="map_disclosed", reason="MCMC_CALIBRATION_ENABLED is False",
+    )
+    model = SimpleNamespace(_interval_calibration=calibration)
+    method, note = deploy_forecast._interval_calibration_for("prophet", model)
+    assert method == deploy_forecast.INTERVAL_CALIBRATION_MAP_DISCLOSED
+    assert note == "MCMC_CALIBRATION_ENABLED is False"
+
+
+def test_interval_calibration_for_prophet_missing_metadata_fails_soft():
+    """A Prophet model with no _interval_calibration attribute at all
+    (e.g. an older pickled artifact from before this tracking existed)
+    must still classify as map_disclosed, not raise or misreport as
+    genuinely calibrated -- the conservative direction to fail in."""
+    model = SimpleNamespace()  # deliberately no _interval_calibration
+    method, note = deploy_forecast._interval_calibration_for("prophet", model)
+    assert method == deploy_forecast.INTERVAL_CALIBRATION_MAP_DISCLOSED
+    assert note == "no calibration metadata attached to model"
+
+
+def test_interval_calibration_for_count_model_carries_its_own_detail():
+    model = SimpleNamespace(detail="negative_binomial_glm(extrapolation-capped)")
+    method, note = deploy_forecast._interval_calibration_for("count_model", model)
+    assert method == deploy_forecast.INTERVAL_CALIBRATION_COUNT_QUANTILE
+    assert note == "negative_binomial_glm(extrapolation-capped)"
+
+
+@pytest.mark.parametrize("algorithm", ["naive", "historical_avg", "seasonal_naive"])
+def test_interval_calibration_for_baselines_are_degenerate(algorithm):
+    method, note = deploy_forecast._interval_calibration_for(algorithm, model=object())
+    assert method == deploy_forecast.INTERVAL_CALIBRATION_DEGENERATE
+    assert note is None
+
+
+def test_interval_calibration_for_unrecognized_algorithm_raises():
+    """A new algorithm added to select_champion_algorithm without a
+    matching branch here is a programming error, not a data condition --
+    this must raise loudly at the source rather than write a value the
+    migration 0018 CHECK constraint would silently reject at INSERT time
+    with a much less informative error."""
+    with pytest.raises(ValueError, match="no interval calibration mapping"):
+        deploy_forecast._interval_calibration_for("some_future_algorithm", model=object())
